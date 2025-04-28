@@ -17,7 +17,7 @@ your_username_2 = os.getenv('YOUR_USERNAME_2')
 
 # Список групп
 groups = [
-    'NRWanzeigen', 'wuppertal_ua', 'berlin1111122/1', 'ukraincifrankfurt',
+    'NRWanzeigen', 'wuppertal_ua', 'ukraincifrankfurt',
     'Manner_ClubNRW', 'uahelp_nrw_auto', 'avtoUAeuro', 'deutscheukraine',
     'ukraineingermany1', 'jobinde', 'hamburg_ukrainians', 'ukrainians_in_germany1',
     'berlin_ukrainians', 'alles_in_Deutschland/1', 'UkraineinMunich', 'workeuropeplus',
