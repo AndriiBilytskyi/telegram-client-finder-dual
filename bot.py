@@ -16,7 +16,14 @@ your_username_2 = 'UA_DE_22'  # без @
 
 # Список групп для отслеживания (юзернеймы)
 groups_to_monitor = [
-    '@NRWanzeigen', '@wuppertal_ua', '@ukraincifrankfurt', '@Manner_ClubNRW', '@uahelp_nrw_auto', '@avtoUAeuro', '@deutscheukraine', '@ukraineingermany1', '@jobinde', '@hamburg_ukrainians', '@ukrainians_in_germany1', '@berlin_ukrainians', '@UkraineinMunich', '@workeuropeplus', '@UA_in_Germany', '@dusseldorfukrain', '@TruckingNordrheinWestfalen', '@Berlin_UA2025', '@bonn_help', '@Ukrainer_in_Deutschland', '@GermanyTop1', '@germany_chatik', '@lifeinde', '@line_DE', '@nrw_anzeige', '@bochum_ua', '@POZITYV_PUTESHESTVIYA', '@uahelpkoelnanzeigen', '@cologne_help', '@TheGermany1', '@germania_migranty', '@GLOBUSEXPRESS',,  # обязательно добавили
+   '@NRWanzeigen', '@wuppertal_ua', '@ukraincifrankfurt', '@Manner_ClubNRW',
+    '@uahelp_nrw_auto', '@avtoUAeuro', '@deutscheukraine', '@ukraineingermany1',
+    '@jobinde', '@hamburg_ukrainians', '@ukrainians_in_germany1', '@berlin_ukrainians',
+    '@UkraineinMunich', '@workeuropeplus', '@UA_in_Germany', '@dusseldorfukrain',
+    '@TruckingNordrheinWestfalen', '@Berlin_UA2025', '@bonn_help', '@Ukrainer_in_Deutschland',
+    '@GermanyTop1', '@germany_chatik', '@lifeinde', '@line_DE', '@nrw_anzeige', '@bochum_ua',
+    '@POZITYV_PUTESHESTVIYA', '@uahelpkoelnanzeigen', '@cologne_help', '@TheGermany1',
+    '@germania_migranty', '@GLOBUSEXPRESS' # обязательно добавили
     # Добавляй сюда остальные группы
 ]
 
