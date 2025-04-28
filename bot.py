@@ -3,14 +3,6 @@ import asyncio
 from datetime import datetime
 from telethon import TelegramClient, events
 
-# Удаляем старые session-файлы при старте
-for session_file in ['session1.session', 'session2.session']:
-    try:
-        os.remove(session_file)
-        print(f'✅ Удален {session_file}')
-    except FileNotFoundError:
-        print(f'ℹ️ {session_file} не найден')
-
 # Данные первого аккаунта
 api_id = 26735008
 api_hash = '6c35a6247e6b6502e5b79173b22af871'
