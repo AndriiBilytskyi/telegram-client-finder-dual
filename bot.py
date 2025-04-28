@@ -20,7 +20,7 @@ groups = [
     'NRWanzeigen', 'wuppertal_ua', 'ukraincifrankfurt',
     'Manner_ClubNRW', 'uahelp_nrw_auto', 'avtoUAeuro', 'deutscheukraine',
     'ukraineingermany1', 'jobinde', 'hamburg_ukrainians', 'ukrainians_in_germany1',
-    'berlin_ukrainians', 'alles_in_Deutschland/1', 'UkraineinMunich', 'workeuropeplus',
+    'berlin_ukrainians', 'UkraineinMunich', 'workeuropeplus',
     'UA_in_Germany', 'dusseldorfukrain', 'TruckingNordrheinWestfalen', 'Berlin_UA2025',
     'bonn_help', 'Ukrainer_in_Deutschland', 'GermanyTop1', 'germany_chatik',
     'lifeinde', 'line_DE', 'nrw_anzeige', 'bochum_ua', 'POZITYV_PUTESHESTVIYA',
