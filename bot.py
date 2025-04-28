@@ -6,35 +6,57 @@ from telethon import TelegramClient, events
 api_id = 26735008
 api_hash = '6c35a6247e6b6502e5b79173b22af871'
 session_name = 'session1'
-your_username = 'Andrii_Bilytskyi'  # без @
+your_username = 'Andrii_Bilytskyi'
 
 # Данные второго аккаунта
 api_id_2 = 20903513
 api_hash_2 = '0eb01bf47aeac4cbfd89fff140a4e06d'
 session_name_2 = 'session2'
-your_username_2 = 'UA_DE_22'  # без @
+your_username_2 = 'UA_DE_22'
 
-# Список групп для отслеживания (юзернеймы)
+# Список групп
 groups_to_monitor = [
-   '@NRWanzeigen', '@wuppertal_ua', '@ukraincifrankfurt', '@Manner_ClubNRW',
-    '@uahelp_nrw_auto', '@avtoUAeuro', '@deutscheukraine', '@ukraineingermany1',
-    '@jobinde', '@hamburg_ukrainians', '@ukrainians_in_germany1', '@berlin_ukrainians',
-    '@UkraineinMunich', '@workeuropeplus', '@UA_in_Germany', '@dusseldorfukrain',
-    '@TruckingNordrheinWestfalen', '@Berlin_UA2025', '@bonn_help', '@Ukrainer_in_Deutschland',
-    '@GermanyTop1', '@germany_chatik', '@lifeinde', '@line_DE', '@nrw_anzeige', '@bochum_ua',
-    '@POZITYV_PUTESHESTVIYA', '@uahelpkoelnanzeigen', '@cologne_help', '@TheGermany1',
-    '@germania_migranty', '@GLOBUSEXPRESS' # обязательно добавили
-    # Добавляй сюда остальные группы
+    '@NRWanzeigen',
+    '@wuppertal_ua',
+    '@ukraineingermany1',
+    '@ukrainians_in_germany1',
+    '@berlin_ukrainians',
+    '@deutscheukraine',
+    '@ukraincifrankfurt',
+    '@Manner_ClubNRW',
+    '@uahelp_nrw_auto',
+    '@avtoUAeuro',
+    '@jobinde',
+    '@hamburg_ukrainians',
+    '@UkraineinMunich',
+    '@workeuropeplus',
+    '@UA_in_Germany',
+    '@dusseldorfukrain',
+    '@TruckingNordrheinWestfalen',
+    '@Berlin_UA2025',
+    '@bonn_help',
+    '@Ukrainer_in_Deutschland',
+    '@GermanyTop1',
+    '@germany_chatik',
+    '@lifeinde',
+    '@line_DE',
+    '@nrw_anzeige',
+    '@bochum_ua',
+    '@POZITYV_PUTESHESTVIYA',
+    '@uahelpkoelnanzeigen',
+    '@cologne_help',
+    '@TheGermany1',
+    '@germania_migranty',
+    '@GLOBUSEXPRESS'
 ]
 
-# Ключевые слова для поиска
-keywords = ['адвокат', 'юрист', 'право', 'помощь адвоката', 'полиция','прокуратура', 'суд']
+# Ключевые слова
+keywords = ['адвокат', 'адвоката', 'адвокатом', 'адвокату', 'юрист', 'юриста', 'юристу', 'юристом', 'право', 'помощь адвоката', 'полиция','прокуратура', 'суд', 'параграф', 'параграфа', 'миграция', 'интеграция']
 
 async def setup_client(api_id, api_hash, session_name, your_username):
     client = TelegramClient(session_name, api_id, api_hash)
     await client.start()
 
-    # Преобразуем юзернеймы в объекты (InputPeer)
     groups_entities = []
     for username in groups_to_monitor:
         try:
@@ -47,15 +69,31 @@ async def setup_client(api_id, api_hash, session_name, your_username):
     @client.on(events.NewMessage(chats=groups_entities))
     async def handler(event):
         message_text = event.raw_text.lower()
+
         if any(keyword in message_text for keyword in keywords):
             try:
                 now = datetime.now().strftime("%d.%m.%Y %H:%M")
-                final_message = (f"[{now}] Новое сообщение в {event.chat.title}:\n\n"
-                                 f"{event.raw_text}")
+
+                sender = await event.get_sender()
+
+                sender_name = ""
+                if sender.username:
+                    sender_name = f"@{sender.username}"
+                elif sender.first_name or sender.last_name:
+                    sender_name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+                else:
+                    sender_name = "Неизвестный пользователь"
+
+                final_message = (
+                    f"[{now}] 📢 Новое сообщение в группе {event.chat.title}:\n\n"
+                    f"👤 Отправитель: {sender_name}\n\n"
+                    f"💬 Сообщение:\n{event.raw_text}"
+                )
+
                 await client.send_message(your_username, final_message)
-                print(f"✅ Сообщение отправлено от {session_name}")
+                print(f"✅ Сообщение переслано от {session_name}")
             except Exception as e:
-                print(f"⚠️ Ошибка при отправке: {e}")
+                print(f"⚠️ Ошибка отправки сообщения: {e}")
 
     return client
 
