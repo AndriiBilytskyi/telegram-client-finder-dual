@@ -45,8 +45,6 @@ async def setup_client(client, phone_number, your_username, client_name):
                 print(f'[{client_name}] Найдено сообщение: {event.raw_text}')
                 await client.send_message(your_username, f"[{client_name}] Новое сообщение в {event.chat.title}:\n\n{event.raw_text}")
 
-
-{event.raw_text}')
                 break
 
 async def main():
