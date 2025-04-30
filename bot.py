@@ -83,8 +83,7 @@ groups_to_monitor = [
     '@Magdeburg_ukrainian', '@Fainy_Kiel', '@refugeesbremen',
     '@ukraine_in_Hanover', '@uahelfen_arbeit', '@bremen_hannover_dresden',
     '@ukraine_in_dresden', '@BavariaLife', '@ErfurtUA', '@save_ukraine_de_essen', '@MunchenBavaria', '@levukrgermany', 
-    '@refugees_help_Koblenz','@KaiserslauternUA', '@Karlsruhe_Ukraine', '@MunchenGessenBremen', '@chatFreiburg',
-    '@+hrLS9t5A3L0wNTk6', '@Pfaffenhofen']
+    '@refugees_help_Koblenz','@KaiserslauternUA', '@Karlsruhe_Ukraine', '@MunchenGessenBremen', '@chatFreiburg', '@+hrLS9t5A3L0wNTk6', '@Pfaffenhofen']
 
 # Ключевые слова
 keywords = ['адвокат', 'адвоката', 'адвокатом', 'адвокату', 'юрист', 'юриста', 'юристу', 'юристом', 'помощь адвоката', 'полиция','прокуратура']
