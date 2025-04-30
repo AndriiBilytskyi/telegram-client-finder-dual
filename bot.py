@@ -79,11 +79,13 @@ groups_to_monitor = [
     '@ukrainiansinboeblengengermany',
     '@Ukrainians_in_Calw',
     '@hilfe_ukraine_chemnitz',
-    '@cottbus_ua',
-]
+    '@cottbus_ua', '@hamburg_ukraine_chat',
+    '@Magdeburg_ukrainian', '@Fainy_Kiel', '@refugeesbremen',
+    '@ukraine_in_Hanover', '@uahelfen_arbeit', '@bremen_hannover_dresden',
+    '@ukraine_in_dresden', '@BavariaLife', '@ErfurtUA']
 
 # Ключевые слова
-keywords = ['адвокат', 'адвоката', 'адвокатом', 'адвокату', 'юрист', 'юриста', 'юристу', 'юристом', 'помощь адвоката', 'полиция','прокуратура', 'суд']
+keywords = ['адвокат', 'адвоката', 'адвокатом', 'адвокату', 'юрист', 'юриста', 'юристу', 'юристом', 'помощь адвоката', 'полиция','прокуратура']
 
 async def setup_client(api_id, api_hash, session_name, your_username):
     client = TelegramClient(session_name, api_id, api_hash)
