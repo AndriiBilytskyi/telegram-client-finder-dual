@@ -57,7 +57,7 @@ GROUPS_TO_MONITOR = list(set([
     '@ErfurtUA', '@save_ukraine_de_essen', '@MunchenBavaria',
     '@refugees_help_Koblenz', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
     '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
-    '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland'
+    '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland', '@Ukrainer_in_Wuppertal'
 ]))
 
 # === Пути к файлам ===
