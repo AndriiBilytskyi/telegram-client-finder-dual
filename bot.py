@@ -22,7 +22,7 @@ ACCOUNTS = [
     }
 ]
 
-# === Ключевые слова (рус, укр, англ, нем) ===
+# === Ключевые слова ===
 KEYWORDS = [
     # Русский
     'адвокат', 'адвоката', 'адвокатом', 'адвокату', 'юрист', 'юриста', 'юристу', 'юристом',
@@ -35,7 +35,7 @@ KEYWORDS = [
     'anwalt', 'rechtsanwalt', 'polizei', 'staatsanwalt', 'gericht'
 ]
 
-# === Группы для мониторинга ===
+# === Группы ===
 GROUPS_TO_MONITOR = list(set([
     '@NRWanzeigen', '@wuppertal_ua', '@ukraineingermany1', '@ukrainians_in_germany1',
     '@berlin_ukrainians', '@deutscheukraine', '@ukraincifrankfurt', '@Manner_ClubNRW',
@@ -58,15 +58,14 @@ GROUPS_TO_MONITOR = list(set([
     '@Pfaffenhofen', '@deutschland_diaspora', '@Ukrainer_in_Wuppertal'
 ]))
 
-# === Файлы кеша и аналитики ===
+# === Пути к файлам ===
 CACHE_FILE = "entities_cache.pickle"
 ANALYTICS_FILE = "analytics.json"
 
 # === Логирование ===
 logging.basicConfig(filename="log.txt", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
-# === Сохраняем аналитику ===
+# === Аналитика ===
 def update_analytics(group_title, matched_keywords):
     if os.path.exists(ANALYTICS_FILE):
         with open(ANALYTICS_FILE, "r", encoding="utf-8") as f:
@@ -84,8 +83,7 @@ def update_analytics(group_title, matched_keywords):
     with open(ANALYTICS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
-# === Кешируем список чатов ===
+# === Загрузка групп (с кешем) ===
 async def load_or_fetch_entities(client, group_usernames):
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, "rb") as f:
@@ -111,11 +109,30 @@ async def load_or_fetch_entities(client, group_usernames):
 
     return groups_entities
 
-
-# === Настройка клиента ===
+# === Основная настройка клиента ===
 async def setup_client(api_id, api_hash, session_name, your_username, group_usernames):
     client = TelegramClient(session_name, api_id, api_hash)
-    await client.start()
+
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            print(f"⚠️ Сессия {session_name} не авторизована. Залогиньтесь вручную локально.")
+            return None
+    except Exception as e:
+        print(f"❌ Ошибка подключения {session_name}: {e}")
+        return None
+
+    for _ in range(10):
+        if client.is_connected():
+            break
+        print(f"⏳ Ждём подключения {session_name}...")
+        await asyncio.sleep(1)
+
+    if not client.is_connected():
+        print(f"❌ Клиент {session_name} не подключён.")
+        return None
+
+    print(f"✅ Клиент {session_name} подключён.")
     entities = await load_or_fetch_entities(client, group_usernames)
 
     @client.on(events.NewMessage(chats=entities))
@@ -151,8 +168,7 @@ async def setup_client(api_id, api_hash, session_name, your_username, group_user
 
     return client
 
-
-# === Основной запуск ===
+# === Главный запуск ===
 async def main():
     clients = []
     for acc in ACCOUNTS:
@@ -161,12 +177,15 @@ async def main():
             acc["session_name"], acc["your_username"],
             GROUPS_TO_MONITOR
         )
-        clients.append(client)
+        if client:
+            clients.append(client)
 
-    await asyncio.gather(*(client.run_until_disconnected() for client in clients))
+    if clients:
+        await asyncio.gather(*(client.run_until_disconnected() for client in clients))
+    else:
+        print("❌ Ни один клиент не подключён.")
 
-
-# === Защита от падений ===
+# === Защита от сбоев ===
 async def safe_main():
     while True:
         try:
