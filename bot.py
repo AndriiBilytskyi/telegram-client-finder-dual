@@ -24,46 +24,49 @@ ACCOUNTS = [
 
 # === Ключевые слова ===
 KEYWORDS = [
-    # Русский
-    'адвокат', 'адвоката', 'адвокатом', 'адвокату', 'юрист', 'юриста', 'юристу', 'юристом',
+    'адвокат', 'адвоката', 'адвокатом', 'адвокату',
+    'юрист', 'юриста', 'юристу', 'юристом',
     'помощь адвоката', 'полиция', 'прокуратура',
-    # Украинский
-    'адвокат', 'юрист', 'поліція', 'прокурор', 'суд',
-    # Английский
+    'поліція', 'прокурор', 'суд',
     'lawyer', 'attorney', 'police', 'prosecutor', 'court',
-    # Немецкий
     'anwalt', 'rechtsanwalt', 'polizei', 'staatsanwalt', 'gericht'
 ]
 
 # === Группы ===
 GROUPS_TO_MONITOR = list(set([
-    '@NRWanzeigen', '@wuppertal_ua', '@ukraineingermany1', '@ukrainians_in_germany1',
-    '@berlin_ukrainians', '@deutscheukraine', '@ukraincifrankfurt', '@Manner_ClubNRW',
-    '@uahelp_nrw_auto', '@avtoUAeuro', '@jobinde', '@hamburg_ukrainians', '@UkraineinMunich',
-    '@workeuropeplus', '@UA_in_Germany', '@dusseldorfukrain', '@TruckingNordrheinWestfalen',
-    '@Berlin_UA2025', '@bonn_help', '@Ukrainer_in_Deutschland', '@GermanyTop1', '@germany_chatik',
-    '@lifeinde', '@line_DE', '@nrw_anzeige', '@bochum_ua', '@POZITYV_PUTESHESTVIYA',
-    '@uahelpkoelnanzeigen', '@cologne_help', '@TheGermany1', '@germania_migranty', '@GLOBUSEXPRESS',
-    '@nashipomogut', '@reklamnaia_ploshadka', '@cologne_market', '@ukr_de_essen', '@solingen_UA',
-    '@keln_baraholka', '@baraholkaNRW', '@ukraine_dortmund', '@ukrainischinDortmund', '@UADuesseldorf',
-    '@beauty_dusseldorf', '@pomoshukraineaachen', '@AhlenNRW', '@alsdorfua', '@aschafenburg',
-    '@NA6R_hilft', '@bad4ua', '@badenbaden_lkr', '@kreiskleve', '@Bernkastel_Wittlich',
-    '@bielefeldhelps', '@ukraine_bochum_support', '@uahelp_ruhrgebiet', '@DeutschlandBottrop',
-    '@BS_UA_HELP', '@refugeesbremen', '@Bruchsal_Chat', '@ukrainiansinboeblengengermany',
-    '@Ukrainians_in_Calw', '@hilfe_ukraine_chemnitz', '@cottbus_ua', '@hamburg_ukraine_chat',
-    '@Magdeburg_ukrainian', '@Fainy_Kiel', '@ukraine_in_Hanover', '@uahelfen_arbeit',
-    '@bremen_hannover_dresden', '@ukraine_in_dresden', '@BavariaLife', '@ErfurtUA',
-    '@save_ukraine_de_essen', '@MunchenBavaria', '@levukrgermany', '@refugees_help_Koblenz',
-    '@KaiserslauternUA', '@Karlsruhe_Ukraine', '@MunchenGessenBremen', '@chatFreiburg',
-    '@Pfaffenhofen', '@deutschland_diaspora', '@Ukrainer_in_Wuppertal'
+    '@NRWanzeigen', '@ukraineingermany1', '@ukrainians_in_germany1',
+    '@berlin_ukrainians', '@deutscheukraine', '@ukraincifrankfurt',
+    '@jobinde', '@hamburg_ukrainians', '@UkraineinMunich',
+    '@workeuropeplus', '@UA_in_Germany', '@dusseldorfukrain',
+    '@TruckingNordrheinWestfalen', '@Berlin_UA2025', '@bonn_help',
+    '@GermanyTop1', '@germany_chatik', '@nrw_anzeige', '@bochum_ua',
+    '@POZITYV_PUTESHESTVIYA', '@uahelpkoelnanzeigen', '@cologne_help',
+    '@TheGermany1', '@germania_migranty', '@GLOBUSEXPRESS',
+    '@nashipomogut', '@reklamnaia_ploshadka', '@ukr_de_essen',
+    '@solingen_UA', '@keln_baraholka', '@baraholkaNRW',
+    '@ukraine_dortmund', '@ukrainischinDortmund', '@UADuesseldorf',
+    '@beauty_dusseldorf', '@pomoshukraineaachen', '@AhlenNRW',
+    '@alsdorfua', '@aschafenburg', '@NA6R_hilft', '@bad4ua',
+    '@badenbaden_lkr', '@kreiskleve', '@Bernkastel_Wittlich',
+    '@bielefeldhelps', '@ukraine_bochum_support', '@uahelp_ruhrgebiet',
+    '@DeutschlandBottrop', '@BS_UA_HELP', '@refugeesbremen',
+    '@Bruchsal_Chat', '@Ukrainians_in_Calw', '@hilfe_ukraine_chemnitz',
+    '@cottbus_ua', '@hamburg_ukraine_chat', '@Magdeburg_ukrainian',
+    '@Fainy_Kiel', '@ukraine_in_Hanover', '@uahelfen_arbeit',
+    '@bremen_hannover_dresden', '@ukraine_in_dresden', '@BavariaLife',
+    '@ErfurtUA', '@save_ukraine_de_essen', '@MunchenBavaria',
+    '@refugees_help_Koblenz', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
+    '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
+    '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland'
 ]))
 
 # === Пути к файлам ===
-CACHE_FILE = "entities_cache.pickle"
+CACHE_DIR = "group_cache"
 ANALYTICS_FILE = "analytics.json"
 
 # === Логирование ===
 logging.basicConfig(filename="log.txt", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 # === Аналитика ===
 def update_analytics(group_title, matched_keywords):
@@ -83,40 +86,53 @@ def update_analytics(group_title, matched_keywords):
     with open(ANALYTICS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# === Загрузка групп (с кешем) ===
-async def load_or_fetch_entities(client, group_usernames):
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "rb") as f:
-            return pickle.load(f)
 
-    groups_entities = []
+# === Получение чатов с индивидуальным кешем ===
+async def load_or_fetch_entities(client, group_usernames):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    entities = []
     seen = set()
 
     for username in group_usernames:
         if username in seen:
             continue
         seen.add(username)
+
+        filename = f"{username.strip('@')}.pkl"
+        cache_path = os.path.join(CACHE_DIR, filename)
+
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    entity = pickle.load(f)
+                    entities.append(entity)
+                    print(f"✅ Кешированная группа загружена: {username}")
+                continue
+            except Exception as e:
+                print(f"⚠️ Ошибка чтения кеша {username}: {e}")
+
         try:
             entity = await client.get_entity(username)
-            groups_entities.append(entity)
-            print(f"✅ Группа найдена: {username}")
-            await asyncio.sleep(1.2)
+            entities.append(entity)
+            with open(cache_path, "wb") as f:
+                pickle.dump(entity, f)
+            print(f"📥 Группа загружена из сети и сохранена: {username}")
+            await asyncio.sleep(1.5)
         except Exception as e:
-            print(f"⚠️ Ошибка получения группы {username}: {e}")
+            print(f"❌ Не удалось получить {username}: {e}")
+            continue
 
-    with open(CACHE_FILE, "wb") as f:
-        pickle.dump(groups_entities, f)
+    return entities
 
-    return groups_entities
 
-# === Основная настройка клиента ===
+# === Настройка клиента ===
 async def setup_client(api_id, api_hash, session_name, your_username, group_usernames):
     client = TelegramClient(session_name, api_id, api_hash)
 
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            print(f"⚠️ Сессия {session_name} не авторизована. Залогиньтесь вручную локально.")
+            print(f"⚠️ Сессия {session_name} не авторизована. Залогиньтесь вручную.")
             return None
     except Exception as e:
         print(f"❌ Ошибка подключения {session_name}: {e}")
@@ -125,7 +141,7 @@ async def setup_client(api_id, api_hash, session_name, your_username, group_user
     for _ in range(10):
         if client.is_connected():
             break
-        print(f"⏳ Ждём подключения {session_name}...")
+        print(f"⏳ Ожидание подключения {session_name}...")
         await asyncio.sleep(1)
 
     if not client.is_connected():
@@ -133,6 +149,7 @@ async def setup_client(api_id, api_hash, session_name, your_username, group_user
         return None
 
     print(f"✅ Клиент {session_name} подключён.")
+
     entities = await load_or_fetch_entities(client, group_usernames)
 
     @client.on(events.NewMessage(chats=entities))
@@ -168,7 +185,8 @@ async def setup_client(api_id, api_hash, session_name, your_username, group_user
 
     return client
 
-# === Главный запуск ===
+
+# === Запуск клиентов ===
 async def main():
     clients = []
     for acc in ACCOUNTS:
@@ -184,6 +202,7 @@ async def main():
         await asyncio.gather(*(client.run_until_disconnected() for client in clients))
     else:
         print("❌ Ни один клиент не подключён.")
+
 
 # === Защита от сбоев ===
 async def safe_main():
