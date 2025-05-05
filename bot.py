@@ -214,5 +214,8 @@ async def safe_main():
             logging.critical(f"🔥 Ошибка в основном цикле: {e}")
             await asyncio.sleep(10)
 
+import warnings
 if __name__ == "__main__":
-    asyncio.run(safe_main())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        asyncio.run(safe_main())
