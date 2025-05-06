@@ -68,7 +68,6 @@ ANALYTICS_FILE = "analytics.json"
 # === Логирование ===
 logging.basicConfig(filename="log.txt", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 # === Аналитика ===
 def update_analytics(group_title, matched_keywords):
     if os.path.exists(ANALYTICS_FILE):
@@ -86,7 +85,6 @@ def update_analytics(group_title, matched_keywords):
 
     with open(ANALYTICS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-
 
 # === Получение чатов с индивидуальным кешем ===
 async def load_or_fetch_entities(client, group_usernames):
@@ -125,7 +123,6 @@ async def load_or_fetch_entities(client, group_usernames):
 
     return entities
 
-
 # === Настройка клиента ===
 async def setup_client(api_id, api_hash, session_name, your_username, group_usernames):
     client = TelegramClient(session_name, api_id, api_hash)
@@ -153,8 +150,13 @@ async def setup_client(api_id, api_hash, session_name, your_username, group_user
 
     entities = await load_or_fetch_entities(client, group_usernames)
 
+    print(f"📡 {session_name}: Подписка на {len(entities)} групп.")
+    for entity in entities:
+        print(f" - {getattr(entity, 'title', '?')} ({getattr(entity, 'id', '?')})")
+
     @client.on(events.NewMessage(chats=entities))
     async def handler(event):
+        print(f"📨 [{session_name}] Получено сообщение в {event.chat.title}")
         message_text = event.raw_text.lower()
         matched = [kw for kw in KEYWORDS if kw in message_text]
 
@@ -186,7 +188,6 @@ async def setup_client(api_id, api_hash, session_name, your_username, group_user
 
     return client
 
-
 # === Запуск клиентов ===
 async def main():
     clients = []
@@ -203,7 +204,6 @@ async def main():
         await asyncio.gather(*(client.run_until_disconnected() for client in clients))
     else:
         print("❌ Ни один клиент не подключён.")
-
 
 # === Защита от сбоев ===
 async def safe_main():
