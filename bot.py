@@ -3,6 +3,7 @@ import asyncio
 import pickle
 import logging
 import json
+import re
 from datetime import datetime
 from telethon import TelegramClient, events
 
@@ -22,7 +23,6 @@ ACCOUNTS = [
     }
 ]
 
-# === Ключевые слова ===
 KEYWORDS = [
     'адвокат', 'адвоката', 'адвокатом', 'адвокату',
     'юрист', 'юриста', 'юристу', 'юристом',
@@ -32,8 +32,7 @@ KEYWORDS = [
     'anwalt', 'rechtsanwalt', 'polizei', 'staatsanwalt', 'gericht'
 ]
 
-# === Группы ===
-GROUPS_TO_MONITOR = list(set([
+GROUPS_TO_MONITOR = [
     '@NRWanzeigen', '@ukraineingermany1', '@ukrainians_in_germany1',
     '@berlin_ukrainians', '@deutscheukraine', '@ukraincifrankfurt',
     '@jobinde', '@hamburg_ukrainians', '@UkraineinMunich',
@@ -57,165 +56,105 @@ GROUPS_TO_MONITOR = list(set([
     '@ErfurtUA', '@save_ukraine_de_essen', '@MunchenBavaria',
     '@refugees_help_Koblenz', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
     '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
-    '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland', '@Ukrainer_in_Wuppertal',
-    '@ukrainians_in_hamburg_ua', '@ukrainians_berlin', '@berlinhelpsukrainians'
-]))
+    '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland',
+    '@Ukrainer_in_Wuppertal', '@ukrainians_in_hamburg_ua', '@ukrainians_berlin',
+    '@berlinhelpsukrainians'
+]
 
-# === Пути к файлам ===
 CACHE_DIR = "group_cache"
 ANALYTICS_FILE = "analytics.json"
 
-# === Логирование ===
 logging.basicConfig(filename="log.txt", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# === Аналитика ===
+# === Нормализация текста ===
+def normalize(text):
+    text = text.lower()
+    text = re.sub(r'[^\w\s]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def update_analytics(group_title, matched_keywords):
-    if os.path.exists(ANALYTICS_FILE):
-        with open(ANALYTICS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
+    try:
         data = {}
+        if os.path.exists(ANALYTICS_FILE):
+            with open(ANALYTICS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
 
-    group_data = data.get(group_title, {"total": 0, "keywords": {}})
-    group_data["total"] += 1
-    for kw in matched_keywords:
-        group_data["keywords"][kw] = group_data["keywords"].get(kw, 0) + 1
+        group_data = data.get(group_title, {"total": 0, "keywords": {}})
+        group_data["total"] += 1
+        for kw in matched_keywords:
+            group_data["keywords"][kw] = group_data["keywords"].get(kw, 0) + 1
 
-    data[group_title] = group_data
+        data[group_title] = group_data
+        with open(ANALYTICS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Ошибка аналитики: {e}")
 
-    with open(ANALYTICS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# === Получение чатов с индивидуальным кешем ===
 async def load_or_fetch_entities(client, group_usernames):
     os.makedirs(CACHE_DIR, exist_ok=True)
     entities = []
-    seen = set()
-
-    for username in group_usernames:
-        if username in seen:
-            continue
-        seen.add(username)
-
-        filename = f"{username.strip('@')}.pkl"
-        cache_path = os.path.join(CACHE_DIR, filename)
-
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, "rb") as f:
-                    entity = pickle.load(f)
-                    entities.append(entity)
-                    print(f"✅ Кешированная группа загружена: {username}")
-                continue
-            except Exception as e:
-                print(f"⚠️ Ошибка чтения кеша {username}: {e}")
-
+    for username in set(group_usernames):
         try:
-            entity = await client.get_entity(username)
-            entities.append(entity)
-            with open(cache_path, "wb") as f:
-                pickle.dump(entity, f)
-            print(f"📥 Группа загружена из сети и сохранена: {username}")
-            await asyncio.sleep(1.5)
+            filename = f"{username.strip('@')}.pkl"
+            path = os.path.join(CACHE_DIR, filename)
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    entities.append(pickle.load(f))
+                print(f"✅ Кеш: {username}")
+            else:
+                entity = await client.get_entity(username)
+                with open(path, "wb") as f:
+                    pickle.dump(entity, f)
+                entities.append(entity)
+                print(f"📥 Из сети: {username}")
         except Exception as e:
-            print(f"❌ Не удалось получить {username}: {e}")
-            continue
-
+            print(f"❌ {username}: {e}")
     return entities
 
-# === Настройка клиента ===
-async def setup_client(api_id, api_hash, session_name, your_username, group_usernames):
-    client = TelegramClient(session_name, api_id, api_hash)
+async def setup_client(config):
+    client = TelegramClient(config["session_name"], config["api_id"], config["api_hash"])
+    await client.connect()
 
-    try:
-        await client.connect()
-        if not await client.is_user_authorized():
-            print(f"⚠️ Сессия {session_name} не авторизована. Залогиньтесь вручную.")
-            return None
-    except Exception as e:
-        print(f"❌ Ошибка подключения {session_name}: {e}")
+    if not await client.is_user_authorized():
+        print(f"⚠️ Авторизуйте вручную: {config['session_name']}")
         return None
 
-    for _ in range(10):
-        if client.is_connected():
-            break
-        print(f"⏳ Ожидание подключения {session_name}...")
-        await asyncio.sleep(1)
-
-    if not client.is_connected():
-        print(f"❌ Клиент {session_name} не подключён.")
-        return None
-
-    print(f"✅ Клиент {session_name} подключён.")
-
-    entities = await load_or_fetch_entities(client, group_usernames)
-
-    print(f"📡 {session_name}: Подписка на {len(entities)} групп.")
-    for entity in entities:
-        print(f" - {getattr(entity, 'title', '?')} ({getattr(entity, 'id', '?')})")
+    print(f"✅ Подключено: {config['session_name']}")
+    entities = await load_or_fetch_entities(client, GROUPS_TO_MONITOR)
+    print(f"📡 {config['session_name']}: следит за {len(entities)} группами")
 
     @client.on(events.NewMessage(chats=entities))
     async def handler(event):
-        print(f"📨 [{session_name}] Получено сообщение в {event.chat.title}")
-        message_text = event.raw_text.lower()
-        matched = [kw for kw in KEYWORDS if kw in message_text]
-
+        text = normalize(event.raw_text)
+        matched = [kw for kw in KEYWORDS if kw in text]
         if matched:
             try:
-                now = datetime.now().strftime("%d.%m.%Y %H:%M")
                 sender = await event.get_sender()
-                sender_name = (
-                    f"@{sender.username}" if sender.username else
-                    f"{sender.first_name or ''} {sender.last_name or ''}".strip() or
-                    "Неизвестный пользователь"
-                )
-
+                sender_name = f"@{sender.username}" if sender.username else f"{sender.first_name} {sender.last_name}".strip()
                 link = f"https://t.me/{event.chat.username}/{event.id}" if event.chat.username else "🔒 Приватная группа"
-
-                final_message = (
-                    f"[{now}] 📢 Новое сообщение в группе: {event.chat.title}\n"
-                    f"🔗 {link}\n\n"
-                    f"👤 Отправитель: {sender_name}\n\n"
-                    f"💬 Сообщение:\n{event.raw_text}"
-                )
-
-                await client.send_message(your_username, final_message)
-                print(f"📬 Переслано в {your_username} | Ключевые слова: {', '.join(matched)}")
+                now = datetime.now().strftime("%d.%m.%Y %H:%M")
+                message = f"[{now}] 📢 {event.chat.title}\n🔗 {link}\n👤 {sender_name}\n💬 {event.raw_text}"
+                await client.send_message(config['your_username'], message)
+                print(f"📬 {config['session_name']}: {event.chat.title} — {matched}")
                 update_analytics(event.chat.title, matched)
-
             except Exception as e:
-                logging.error(f"❌ Ошибка при обработке сообщения: {e}")
-
+                logging.error(f"Ошибка обработки: {e}")
     return client
 
-# === Запуск клиентов ===
 async def main():
     clients = []
-    for acc in ACCOUNTS:
-        client = await setup_client(
-            acc["api_id"], acc["api_hash"],
-            acc["session_name"], acc["your_username"],
-            GROUPS_TO_MONITOR
-        )
-        if client:
-            clients.append(client)
-
+    for config in ACCOUNTS:
+        try:
+            client = await setup_client(config)
+            if client:
+                clients.append(client)
+        except Exception as e:
+            logging.critical(f"Ошибка клиента {config['session_name']}: {e}")
     if clients:
         await asyncio.gather(*(client.run_until_disconnected() for client in clients))
     else:
-        print("❌ Ни один клиент не подключён.")
+        print("❌ Ни один клиент не работает")
 
-# === Защита от сбоев ===
-async def safe_main():
-    while True:
-        try:
-            await main()
-        except Exception as e:
-            logging.critical(f"🔥 Ошибка в основном цикле: {e}")
-            await asyncio.sleep(10)
-
-import warnings
 if __name__ == "__main__":
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        asyncio.run(safe_main())
+    asyncio.run(main())
