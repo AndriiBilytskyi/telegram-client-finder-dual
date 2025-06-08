@@ -43,7 +43,7 @@ GROUPS_TO_MONITOR = [
     '@TheGermany1', '@germania_migranty', '@GLOBUSEXPRESS',
     '@nashipomogut', '@ukr_de_essen', '@save_ukraine_de_essen',
     '@solingen_UA', '@keln_baraholka',
-    '@ukraine_dortmund', '@ukrainischinDortmund', '@UADuesseldorf',
+    '@ukraine_dortmund', '@UADuesseldorf',
     '@beauty_dusseldorf', '@pomoshukraineaachen', '@AhlenNRW',
     '@alsdorfua', '@aschafenburg', '@NA6R_hilft', '@bad4ua',
     '@badenbaden_lkr', '@kreiskleve', '@Bernkastel_Wittlich',
