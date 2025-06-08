@@ -53,7 +53,7 @@ GROUPS_TO_MONITOR = [
     '@cottbus_ua', '@hamburg_ukraine_chat', '@Magdeburg_ukrainian',
     '@Fainy_Kiel', '@ukraine_in_Hanover', '@uahelfen_arbeit',
     '@bremen_hannover_dresden', '@ukraine_in_dresden', '@BavariaLife',
-    '@ErfurtUA', '@save_ukraine_de_essen', '@MunchenBavaria',
+    '@ErfurtUA', '@MunchenBavaria',
     '@refugees_help_Koblenz', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
     '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
     '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland',
