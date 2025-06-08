@@ -58,7 +58,7 @@ GROUPS_TO_MONITOR = [
     '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
     '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland',
     '@Ukrainer_in_Wuppertal', '@ukrainians_in_hamburg_ua', '@ukrainians_berlin',
-    '@berlinhelpsukrainians', '@Bayreuth_Bamberg', '@migranty_germania'
+    '@berlinhelpsukrainians', '@Bayreuth_Bamberg', '@migranty_germania', '@germania_migranty'
 ]
 
 CACHE_DIR = "group_cache"
