@@ -19,7 +19,7 @@ ACCOUNTS = [
         "api_id": 20903513,
         "api_hash": '0eb01bf47aeac4cbfd89fff140a4e06d',
         "session_name": 'session2',
-        "your_username": 'UA_DE_22',
+        "your_username": 'Anwalt_Bilytskyi',
     }
 ]
 
