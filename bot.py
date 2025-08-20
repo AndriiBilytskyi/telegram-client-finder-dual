@@ -7,32 +7,45 @@ import re
 from datetime import datetime
 from telethon import TelegramClient, events
 
-# === Конфигурация аккаунтов ===
+# === Конфигурация аккаунтов (объединено) ===
 ACCOUNTS = [
     {
         "api_id": 26735008,
-        "api_hash": '6c35a6247e6b6502e5b79173b22af871',
-        "session_name": 'session1',
-        "your_username": 'Andrii_Bilytskyi',
+        "api_hash": "6c35a6247e6b6502e5b79173b22af871",
+        "session_name": "session1",
+        "your_username": "Andrii_Bilytskyi",
     },
     {
         "api_id": 20903513,
-        "api_hash": '0eb01bf47aeac4cbfd89fff140a4e06d',
-        "session_name": 'session2',
-        "your_username": 'Anwalt_Bilytskyi',
-    }
+        "api_hash": "0eb01bf47aeac4cbfd89fff140a4e06d",
+        "session_name": "session2",
+        "your_username": "Anwalt_Bilytskyi",
+    },
+    {
+        "api_id": 21804794,
+        "api_hash": "058679a4c7309574438dc9229be0ebb5",
+        "session_name": "session5",
+        "your_username": "advokat_bilytskyi",
+    },
 ]
 
-KEYWORDS = [
+# === Ключевые слова (объединено + без дублей) ===
+KEYWORDS = sorted(set([
+    # RU/UA
     'адвокат', 'адвоката', 'адвокатом', 'адвокату',
     'юрист', 'юриста', 'юристу', 'юристом',
     'помощь адвоката', 'полиция', 'прокуратура',
-    'поліція', 'прокурор',
+    'поліція', 'прокурор', 'страховка', 'финансы',
+    # DE
+    'anwalt', 'rechtsanwalt', 'polizei', 'staatsanwalt', 'gericht', 'versicherung',
+    # EN + варианты
     'lawyer', 'attorney', 'police', 'prosecutor', 'court',
-    'anwalt', 'rechtsanwalt', 'polizei', 'staatsanwalt', 'gericht'
-]
+    'advokat', 'advocate', 'versicherung', 'versicherunG'  # регистр неважен
+]))
 
-GROUPS_TO_MONITOR = [
+# === Группы (объединено + без дублей) ===
+GROUPS_TO_MONITOR = sorted(set([
+    # Германия (из первого файла)
     '@NRWanzeigen', '@ukraineingermany1', '@ukrainians_in_germany1',
     '@berlin_ukrainians', '@deutscheukraine', '@ukraincifrankfurt',
     '@jobinde', '@hamburg_ukrainians', '@UkraineinMunich',
@@ -58,22 +71,33 @@ GROUPS_TO_MONITOR = [
     '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
     '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland',
     '@Ukrainer_in_Wuppertal', '@ukrainians_in_hamburg_ua', '@ukrainians_berlin',
-    '@berlinhelpsukrainians', '@Bayreuth_Bamberg', '@migranty_germania', '@germania_migranty'
-]
+    '@berlinhelpsukrainians', '@Bayreuth_Bamberg',
+    # Дублирующееся имя уже выше: '@germania_migranty'
+    # Австрия (из второго файла)
+    '@austriaobiavlenia', '@ukraineat', '@ukraineaustriaat',
+    '@Ukrainians_in_Wien', '@Vienna_Linz', '@TheAustria1',
+    '@Salzburg_Vena', '@qXGhIDwK00A4MWM0', '@austria_ua',
+    '@refugeesinAustria', '@dopomogaavstria', '@Ukrainians_Wels_Linz',
+    '@cafe_kyiv_linz', '@usteiermark',
+]))
 
 CACHE_DIR = "group_cache"
 ANALYTICS_FILE = "analytics.json"
 
-logging.basicConfig(filename="log.txt", level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    filename="log.txt",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # === Нормализация текста ===
-def normalize(text):
+def normalize(text: str) -> str:
     text = text.lower()
-    text = re.sub(r'[^\w\s]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
-def update_analytics(group_title, matched_keywords):
+def update_analytics(group_title: str, matched_keywords):
     try:
         data = {}
         if os.path.exists(ANALYTICS_FILE):
@@ -94,7 +118,8 @@ def update_analytics(group_title, matched_keywords):
 async def load_or_fetch_entities(client, group_usernames):
     os.makedirs(CACHE_DIR, exist_ok=True)
     entities = []
-    for username in set(group_usernames):
+    # set() уже сделан выше, но на всякий случай: ещё раз избавимся от дублей
+    for username in sorted(set(group_usernames)):
         try:
             filename = f"{username.strip('@')}.pkl"
             path = os.path.join(CACHE_DIR, filename)
@@ -126,16 +151,23 @@ async def setup_client(config):
 
     @client.on(events.NewMessage(chats=entities))
     async def handler(event):
-        text = normalize(event.raw_text)
-        matched = [kw for kw in KEYWORDS if kw in text]
+        if not event.raw_text:
+            return  # пропускаем служебные/медийные сообщения без текста
+        text_norm = normalize(event.raw_text)
+        matched = [kw for kw in KEYWORDS if kw in text_norm]
         if matched:
             try:
                 sender = await event.get_sender()
-                sender_name = f"@{sender.username}" if sender.username else f"{sender.first_name} {sender.last_name}".strip()
-                link = f"https://t.me/{event.chat.username}/{event.id}" if event.chat.username else "🔒 Приватная группа"
+                sender_name = f"@{sender.username}" if getattr(sender, "username", None) else f"{(sender.first_name or '').strip()} {(sender.last_name or '').strip()}".strip()
+                link = f"https://t.me/{event.chat.username}/{event.id}" if getattr(event.chat, "username", None) else "🔒 Приватная группа"
                 now = datetime.now().strftime("%d.%m.%Y %H:%M")
-                message = f"[{now}] 📢 {event.chat.title}\n🔗 {link}\n👤 {sender_name}\n💬 {event.raw_text}"
-                await client.send_message(config['your_username'], message)
+                message = (
+                    f"[{now}] 📢 {event.chat.title}\n"
+                    f"🔗 {link}\n"
+                    f"👤 {sender_name}\n"
+                    f"💬 {event.raw_text}"
+                )
+                await client.send_message(config["your_username"], message)
                 print(f"📬 {config['session_name']}: {event.chat.title} — {matched}")
                 update_analytics(event.chat.title, matched)
             except Exception as e:
