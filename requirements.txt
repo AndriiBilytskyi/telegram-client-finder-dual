@@ -1,1 +1,5 @@
-telethon
+telethon>=1.36
+tgcrypto>=1.2.5
+rsa
+pyaes
+pysocks
