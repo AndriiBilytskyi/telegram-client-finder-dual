@@ -1,13 +1,44 @@
 import os
-import asyncio
-import pickle
-import logging
-import json
+import sys
 import re
+import json
+import pickle
+import signal
+import asyncio
+import logging
+import traceback
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
+
+import telethon
 from telethon import TelegramClient, events
 
-# === Конфигурация аккаунтов (объединено) ===
+# ====== НАСТРОЙКА ЛОГОВ =======================================================
+LOG_PATH = os.getenv("LOG_PATH", "/data/bot.log")  # если нет диска /data, файл создастся рядом
+os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+fh = RotatingFileHandler(LOG_PATH, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+
+sh = logging.StreamHandler(sys.stdout)
+sh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+
+root_logger.handlers = [fh, sh]
+
+def excepthook(exc_type, exc, tb):
+    logging.critical("UNCAUGHT EXCEPTION:\n%s", "".join(traceback.format_exception(exc_type, exc, tb)))
+sys.excepthook = excepthook
+
+def loop_exc_handler(loop, context):
+    msg = context.get("exception") or context.get("message")
+    logging.critical("ASYNC EXCEPTION: %s", msg, exc_info=context.get("exception"))
+
+# ====== КОНФИГ ================================================================
+print("Telethon version:", getattr(telethon, "__version__", "unknown"))
+
 ACCOUNTS = [
     {
         "api_id": 26735008,
@@ -29,7 +60,6 @@ ACCOUNTS = [
     },
 ]
 
-# === Ключевые слова (объединено + без дублей) ===
 KEYWORDS = sorted(set([
     # RU/UA
     'адвокат', 'адвоката', 'адвокатом', 'адвокату',
@@ -40,12 +70,10 @@ KEYWORDS = sorted(set([
     'anwalt', 'rechtsanwalt', 'polizei', 'staatsanwalt', 'gericht', 'versicherung',
     # EN + варианты
     'lawyer', 'attorney', 'police', 'prosecutor', 'court',
-    'advokat', 'advocate', 'versicherung', 'versicherunG'  # регистр неважен
+    'advokat', 'advocate'
 ]))
 
-# === Группы (объединено + без дублей) ===
 GROUPS_TO_MONITOR = sorted(set([
-    # Германия (из первого файла)
     '@NRWanzeigen', '@ukraineingermany1', '@ukrainians_in_germany1',
     '@berlin_ukrainians', '@deutscheukraine', '@ukraincifrankfurt',
     '@jobinde', '@hamburg_ukrainians', '@UkraineinMunich',
@@ -67,30 +95,28 @@ GROUPS_TO_MONITOR = sorted(set([
     '@Fainy_Kiel', '@ukraine_in_Hanover', '@uahelfen_arbeit',
     '@bremen_hannover_dresden', '@ukraine_in_dresden', '@BavariaLife',
     '@ErfurtUA', '@MunchenBavaria', '@ua_ka_help', '@Ukrainians_in_Berlin_ua',
-    '@koblenz_ta_navkolo', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
+    '@refugeesinAustria', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
     '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
     '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland',
     '@Ukrainer_in_Wuppertal', '@ukrainians_in_hamburg_ua', '@ukrainians_berlin',
     '@berlinhelpsukrainians', '@Bayreuth_Bamberg',
-    # Дублирующееся имя уже выше: '@germania_migranty'
-    # Австрия (из второго файла)
+    # Австрия
     '@austriaobiavlenia', '@ukraineat', '@ukraineaustriaat',
     '@Ukrainians_in_Wien', '@Vienna_Linz', '@TheAustria1',
     '@Salzburg_Vena', '@qXGhIDwK00A4MWM0', '@austria_ua',
-    '@refugeesinAustria', '@dopomogaavstria', '@Ukrainians_Wels_Linz',
-    '@cafe_kyiv_linz', '@usteiermark',
+    '@Ukrainians_Wels_Linz', '@cafe_kyiv_linz', '@usteiermark',
+    # Ты добавил замену для Koblenz:
+    '@koblenz_ta_navkolo',
 ]))
 
-CACHE_DIR = "group_cache"
-ANALYTICS_FILE = "analytics.json"
+# Директории/файлы
+DEFAULT_DATA_DIR = "/data" if os.path.isdir("/data") else "."
+CACHE_DIR = os.getenv("CACHE_DIR", os.path.join(DEFAULT_DATA_DIR, "group_cache"))
+ANALYTICS_FILE = os.getenv("ANALYTICS_FILE", os.path.join(DEFAULT_DATA_DIR, "analytics.json"))
 
-logging.basicConfig(
-    filename="log.txt",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-# === Нормализация текста ===
+# ====== УТИЛИТЫ ==============================================================
 def normalize(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^\w\s]", " ", text)
@@ -116,9 +142,7 @@ def update_analytics(group_title: str, matched_keywords):
         logging.error(f"Ошибка аналитики: {e}")
 
 async def load_or_fetch_entities(client, group_usernames):
-    os.makedirs(CACHE_DIR, exist_ok=True)
     entities = []
-    # set() уже сделан выше, но на всякий случай: ещё раз избавимся от дублей
     for username in sorted(set(group_usernames)):
         try:
             filename = f"{username.strip('@')}.pkl"
@@ -137,56 +161,89 @@ async def load_or_fetch_entities(client, group_usernames):
             print(f"❌ {username}: {e}")
     return entities
 
-async def setup_client(config):
-    client = TelegramClient(config["session_name"], config["api_id"], config["api_hash"])
-    await client.connect()
+# ====== ЖИЗНЕЦИКЛ КЛИЕНТА ====================================================
+shutdown = asyncio.Event()
 
-    if not await client.is_user_authorized():
-        print(f"⚠️ Авторизуйте вручную: {config['session_name']}")
-        return None
+def _handle_signal():
+    shutdown.set()
 
-    print(f"✅ Подключено: {config['session_name']}")
-    entities = await load_or_fetch_entities(client, GROUPS_TO_MONITOR)
-    print(f"📡 {config['session_name']}: следит за {len(entities)} группами")
-
-    @client.on(events.NewMessage(chats=entities))
-    async def handler(event):
-        if not event.raw_text:
-            return  # пропускаем служебные/медийные сообщения без текста
-        text_norm = normalize(event.raw_text)
-        matched = [kw for kw in KEYWORDS if kw in text_norm]
-        if matched:
-            try:
-                sender = await event.get_sender()
-                sender_name = f"@{sender.username}" if getattr(sender, "username", None) else f"{(sender.first_name or '').strip()} {(sender.last_name or '').strip()}".strip()
-                link = f"https://t.me/{event.chat.username}/{event.id}" if getattr(event.chat, "username", None) else "🔒 Приватная группа"
-                now = datetime.now().strftime("%d.%m.%Y %H:%M")
-                message = (
-                    f"[{now}] 📢 {event.chat.title}\n"
-                    f"🔗 {link}\n"
-                    f"👤 {sender_name}\n"
-                    f"💬 {event.raw_text}"
-                )
-                await client.send_message(config["your_username"], message)
-                print(f"📬 {config['session_name']}: {event.chat.title} — {matched}")
-                update_analytics(event.chat.title, matched)
-            except Exception as e:
-                logging.error(f"Ошибка обработки: {e}")
-    return client
-
-async def main():
-    clients = []
-    for config in ACCOUNTS:
+async def run_client_forever(config):
+    """Запуск клиента с авто-перезапуском при критических ошибках."""
+    backoff = 5
+    while not shutdown.is_set():
+        client = None
         try:
-            client = await setup_client(config)
-            if client:
-                clients.append(client)
+            client = TelegramClient(config["session_name"], config["api_id"], config["api_hash"])
+            await client.connect()
+            if not await client.is_user_authorized():
+                print(f"⚠️ Авторизуйте вручную: {config['session_name']}")
+                await asyncio.sleep(backoff)
+                continue
+
+            print(f"✅ Подключено: {config['session_name']}")
+            entities = await load_or_fetch_entities(client, GROUPS_TO_MONITOR)
+            print(f"📡 {config['session_name']}: следит за {len(entities)} группами")
+
+            @client.on(events.NewMessage(chats=entities))
+            async def handler(event):
+                if not event.raw_text:
+                    return
+                text_norm = normalize(event.raw_text)
+                matched = [kw for kw in KEYWORDS if kw in text_norm]
+                if matched:
+                    try:
+                        sender = await event.get_sender()
+                        if getattr(sender, "username", None):
+                            sender_name = f"@{sender.username}"
+                        else:
+                            fn = (sender.first_name or "").strip()
+                            ln = (sender.last_name or "").strip()
+                            sender_name = f"{fn} {ln}".strip()
+
+                        link = f"https://t.me/{getattr(event.chat,'username',None)}/{event.id}" \
+                               if getattr(event.chat, "username", None) else "🔒 Приватная группа"
+                        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+                        message = (
+                            f"[{now}] 📢 {event.chat.title}\n"
+                            f"🔗 {link}\n"
+                            f"👤 {sender_name}\n"
+                            f"💬 {event.raw_text}"
+                        )
+                        await client.send_message(config["your_username"], message)
+                        print(f"📬 {config['session_name']}: {event.chat.title} — {matched}")
+                        update_analytics(event.chat.title, matched)
+                    except Exception as e:
+                        logging.error(f"Ошибка обработки: {e}")
+
+            backoff = 5  # успешный старт — сбрасываем бэкофф
+            await client.run_until_disconnected()
+
         except Exception as e:
-            logging.critical(f"Ошибка клиента {config['session_name']}: {e}")
-    if clients:
-        await asyncio.gather(*(client.run_until_disconnected() for client in clients))
-    else:
-        print("❌ Ни один клиент не работает")
+            logging.critical(f"Критическая ошибка {config['session_name']}: {e}")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+# ====== MAIN =================================================================
+async def main():
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(loop_exc_handler)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _handle_signal)
+        except NotImplementedError:
+            pass
+
+    tasks = [asyncio.create_task(run_client_forever(cfg)) for cfg in ACCOUNTS]
+    await shutdown.wait()
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
