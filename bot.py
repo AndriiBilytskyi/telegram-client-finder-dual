@@ -67,7 +67,7 @@ GROUPS_TO_MONITOR = sorted(set([
     '@Fainy_Kiel', '@ukraine_in_Hanover', '@uahelfen_arbeit',
     '@bremen_hannover_dresden', '@ukraine_in_dresden', '@BavariaLife',
     '@ErfurtUA', '@MunchenBavaria', '@ua_ka_help', '@Ukrainians_in_Berlin_ua',
-    '@refugees_help_Koblenz', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
+    '@koblenz_ta_navkolo', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
     '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
     '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland',
     '@Ukrainer_in_Wuppertal', '@ukrainians_in_hamburg_ua', '@ukrainians_berlin',
