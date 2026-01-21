@@ -52,12 +52,6 @@ ACCOUNTS = [
         "session_name": "session2",
         "your_username": "Anwalt_Bilytskyi",
     },
-    {
-        "api_id": 24710919,
-        "api_hash": "c45c854a6f1ccb165e8c179c5a626216",
-        "session_name": "session6",
-        "your_username": "vladmarchenko9",
-    },
 ]
 
 KEYWORDS = sorted(set([
