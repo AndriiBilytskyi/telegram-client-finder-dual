@@ -1,1094 +1,857 @@
-import os
-import sys
-import re
-import json
-import time
 import asyncio
+import json
 import logging
-import traceback
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
-from typing import Dict, Any, Tuple, List
+import os
+import re
+import time
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-import telethon
+from openai import AsyncOpenAI
 from telethon import TelegramClient, events
-from telethon.errors import (
-    FloodWaitError,
-    PeerFloodError,
-    UserPrivacyRestrictedError,
-    UserNotMutualContactError,
-    ChatWriteForbiddenError,
-    RPCError,
+from telethon.errors import FloodWaitError
+from telethon.errors.common import TypeNotFoundError
+from telethon.sessions import StringSession
+from telethon.tl.types import PeerUser, User
+
+# =========================
+# Logging
+# =========================
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
-from telethon.tl.functions.channels import InviteToChannelRequest
-from telethon.tl.types import InputPeerUser
+logger = logging.getLogger(__name__)
 
 try:
-    from openai import AsyncOpenAI
+    import telethon
+    logger.info("Telethon version: %s", telethon.__version__)
 except Exception:
-    AsyncOpenAI = None
+    pass
+
+# =========================
+# Paths / storage
+# =========================
+BASE_DIR = Path(os.getenv("DATA_DIR", ".")).resolve()
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+ANALYTICS_PATH = BASE_DIR / os.getenv("ANALYTICS_FILE", "analytics.json")
+SEEN_MESSAGES_PATH = BASE_DIR / os.getenv("SEEN_MESSAGES_FILE", "seen_messages.json")
+
+# =========================
+# Env helpers
+# =========================
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-# =============================================================================
-# LOGGING
-# =============================================================================
-
-LOG_PATH = os.getenv("LOG_PATH", "/data/bot.log")
-log_dir = os.path.dirname(LOG_PATH)
-if log_dir:
-    os.makedirs(log_dir, exist_ok=True)
-
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-
-fh = RotatingFileHandler(LOG_PATH, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
-fh.setFormatter(_formatter)
-
-sh = logging.StreamHandler(sys.stdout)
-sh.setFormatter(_formatter)
-
-root_logger.handlers = [fh, sh]
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 
-def excepthook(exc_type, exc, tb):
-    logging.critical("UNCAUGHT EXCEPTION:\n%s", "".join(traceback.format_exception(exc_type, exc, tb)))
-
-
-sys.excepthook = excepthook
-
-
-def loop_exc_handler(loop, context):
-    msg = context.get("exception") or context.get("message")
-    logging.critical("ASYNC EXCEPTION: %s", msg, exc_info=context.get("exception"))
-
-
-# =============================================================================
-# CONFIG
-# =============================================================================
-
-print("Telethon version:", getattr(telethon, "__version__", "unknown"))
-
-DEFAULT_GROUPS = sorted(set([
-    '@NRWanzeigen', '@ukraineingermany1', '@ukrainians_in_germany1',
-    '@berlin_ukrainians', '@deutscheukraine', '@ukraincifrankfurt',
-    '@jobinde', '@hamburg_ukrainians', '@UkraineinMunich',
-    '@workeuropeplus', '@UA_in_Germany', '@dusseldorfukrain',
-    '@TruckingNordrheinWestfalen', '@Berlin_UA2025', '@bonn_help',
-    '@GermanyTop1', '@germany_chatik', '@nrw_anzeige', '@bochum_ua',
-    '@POZITYV_PUTESHESTVIYA', '@uahelpkoelnanzeigen', '@cologne_help',
-    '@TheGermany1', '@germania_migranty', '@GLOBUSEXPRESS',
-    '@nashipomogut', '@ukr_de_essen', '@save_ukraine_de_essen',
-    '@solingen_UA', '@keln_baraholka',
-    '@ukraine_dortmund', '@UADuesseldorf',
-    '@beauty_dusseldorf', '@pomoshukraineaachen', '@AhlenNRW',
-    '@alsdorfua', '@aschafenburg', '@NA6R_hilft', '@bad4ua',
-    '@badenbaden_lkr', '@kreiskleve', '@Bernkastel_Wittlich',
-    '@bielefeldhelps', '@ukraine_bochum_support', '@uahelp_ruhrgebiet',
-    '@DeutschlandBottrop', '@BS_UA_HELP', '@refugeesbremen',
-    '@Bruchsal_Chat', '@Ukrainians_in_Calw', '@hilfe_ukraine_chemnitz',
-    '@cottbus_ua', '@hamburg_ukraine_chat', '@Magdeburg_ukrainian',
-    '@Fainy_Kiel', '@ukraine_in_Hanover', '@uahelfen_arbeit',
-    '@bremen_hannover_dresden', '@ukraine_in_dresden', '@BavariaLife',
-    '@ErfurtUA', '@MunchenBavaria', '@ua_ka_help', '@Ukrainians_in_Berlin_ua',
-    '@refugeesinAustria', '@KaiserslauternUA', '@Karlsruhe_Ukraine',
-    '@MunchenGessenBremen', '@chatFreiburg', '@Pfaffenhofen',
-    '@deutschland_diaspora', '@Manner_ClubNRW', '@Ukrainer_in_Deutschland',
-    '@Ukrainer_in_Wuppertal', '@ukrainians_in_hamburg_ua', '@ukrainians_berlin',
-    '@berlinhelpsukrainians', '@Bayreuth_Bamberg',
-    '@austriaobiavlenia', '@ukraineat', '@ukraineaustriaat',
-    '@Ukrainians_in_Wien', '@Vienna_Linz', '@TheAustria1',
-    '@Salzburg_Vena', '@qXGhIDwK00A4MWM0', '@austria_ua',
-    '@Ukrainians_Wels_Linz', '@cafe_kyiv_linz', '@usteiermark',
-    '@koblenz_ta_navkolo',
-]))
-
-raw_groups = os.getenv("GROUPS_TO_MONITOR", "").strip()
-GROUPS_TO_MONITOR = sorted(set(
-    [g.strip() for g in raw_groups.split(",") if g.strip()] if raw_groups else DEFAULT_GROUPS
-))
-
-ACCOUNTS = [
-    {
-        "api_id": int(os.getenv("TG_API_ID_1", "0") or "0"),
-        "api_hash": os.getenv("TG_API_HASH_1", "").strip(),
-        "session_name": os.getenv("TG_SESSION_1", "session1").strip(),
-        "your_username": os.getenv("TG_ME_USERNAME_1", "Andrii_Bilytskyi").strip().lstrip("@"),
-    },
-    {
-        "api_id": int(os.getenv("TG_API_ID_2", "0") or "0"),
-        "api_hash": os.getenv("TG_API_HASH_2", "").strip(),
-        "session_name": os.getenv("TG_SESSION_2", "session2").strip(),
-        "your_username": os.getenv("TG_ME_USERNAME_2", "Anwalt_Bilytskyi").strip().lstrip("@"),
-    },
-]
-
-ADMIN_NOTIFY_USERNAME = os.getenv("ADMIN_NOTIFY_USERNAME", "Andrii_Bilytskyi").strip().lstrip("@")
-TARGET_INVITE_GROUP = os.getenv("TARGET_INVITE_GROUP", "@advocate_ua_1").strip()
-
-AUTO_SEND_HIGH_CONFIDENCE = os.getenv("AUTO_SEND_HIGH_CONFIDENCE", "0").strip() == "1"
-AUTO_SEND_THRESHOLD = float(os.getenv("AUTO_SEND_THRESHOLD", "0.92"))
-AUTO_INVITE_AFTER_DM = os.getenv("AUTO_INVITE_AFTER_DM", "0").strip() == "1"
-
+# =========================
+# Config
+# =========================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip()
-OPENAI_TIMEOUT_SEC = int(os.getenv("OPENAI_TIMEOUT_SEC", "45"))
-MAX_AI_INPUT_CHARS = int(os.getenv("MAX_AI_INPUT_CHARS", "2400"))
+OPENAI_TIMEOUT_SEC = env_int("OPENAI_TIMEOUT_SEC", 45)
+ENABLE_OPENAI = env_bool("ENABLE_OPENAI", True)
 
-DEFAULT_DATA_DIR = "/data" if os.path.isdir("/data") else "."
-DATA_DIR = os.getenv("DATA_DIR", DEFAULT_DATA_DIR).strip() or "."
-CACHE_DIR = os.getenv("CACHE_DIR", os.path.join(DATA_DIR, "group_cache"))
-SEEN_FILE = os.path.join(DATA_DIR, "seen_messages.json")
-LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
-ANALYTICS_FILE = os.path.join(DATA_DIR, "analytics.json")
-FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
-OUTBOUND_FILE = os.path.join(DATA_DIR, "outbound_stats.json")
+ALERT_CHAT = os.getenv("ALERT_CHAT", "me").strip() or "me"
+AUTO_REPLY_TO_GROUP = env_bool("AUTO_REPLY_TO_GROUP", False)
+SEND_DRAFT_TO_ALERT = env_bool("SEND_DRAFT_TO_ALERT", True)
+MAX_TEXT_LEN_FOR_MODEL = env_int("MAX_TEXT_LEN_FOR_MODEL", 3500)
+LEAD_SCORE_THRESHOLD = env_int("LEAD_SCORE_THRESHOLD", 45)
+REPLY_MIN_SCORE = env_int("REPLY_MIN_SCORE", 60)
+SEEN_CACHE_LIMIT = env_int("SEEN_CACHE_LIMIT", 5000)
+MAX_ALERT_TEXT = env_int("MAX_ALERT_TEXT", 1200)
+IGNORE_OWN_MESSAGES = env_bool("IGNORE_OWN_MESSAGES", True)
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(CACHE_DIR, exist_ok=True)
+RAW_MONITORED_CHATS = os.getenv("MONITORED_CHATS", "")
+MONITORED_CHATS = [c.strip() for c in RAW_MONITORED_CHATS.split(",") if c.strip()]
 
-OUTBOUND_DM_PER_DAY = int(os.getenv("OUTBOUND_DM_PER_DAY", "25"))
-OUTBOUND_DM_PER_HOUR = int(os.getenv("OUTBOUND_DM_PER_HOUR", "8"))
-INVITE_PER_DAY = int(os.getenv("INVITE_PER_DAY", "20"))
-MIN_SECONDS_BETWEEN_DMS = int(os.getenv("MIN_SECONDS_BETWEEN_DMS", "180"))
+RAW_REPLY_TARGET_CATEGORIES = os.getenv(
+    "REPLY_TARGET_CATEGORIES",
+    "LEGAL_HELP,MIGRATION_HELP,FAMILY_LAW,STATUS_PROBLEMS,DOCUMENTS,COURT,RESIDENCE",
+)
+REPLY_TARGET_CATEGORIES = {x.strip().upper() for x in RAW_REPLY_TARGET_CATEGORIES.split(",") if x.strip()}
 
-LAWYER_SITE = "https://andriibilytskyi.com"
-LAWYER_ANWALT = "https://www.anwalt.de/andrii-bilytskyi"
-LAWYER_GROUP = "https://t.me/advocate_ua_1"
-LAWYER_BRIEF = (
-    "Адвокат Андрій Білицький. Правова допомога в Україні та Німеччині. "
-    "Практика включає кримінальні, цивільні, адміністративні справи, міграцію та інтеграцію, "
-    "а також представництво в суді й консультації для українців у Німеччині."
+LAWYER_PROFILE = {
+    "name": "Andrii Bilytskyi",
+    "title": "Ukrainian lawyer / Rechtsanwalt-style legal consultant for Ukrainian-speaking clients in Germany and EU",
+    "site": "https://www.andriibilytskyi.com",
+    "anwalt_profile": "https://www.anwalt.de/andrii-bilytskyi",
+    "telegram": "https://t.me/advocate_ua_1",
+    "languages": ["Ukrainian", "Russian", "German"],
+    "focus": [
+        "immigration and residence issues",
+        "family law and children-related disputes",
+        "recognition and enforcement of foreign decisions",
+        "administrative matters in Germany",
+        "cross-border legal issues for Ukrainians in Germany and EU",
+    ],
+    "positioning": [
+        "calm, respectful, professional",
+        "never promise a result",
+        "offer a short orientation and invite private contact",
+        "do not sound spammy or aggressive",
+        "reply like a real lawyer, not a generic sales bot",
+    ],
+}
+
+SYSTEM_STYLE = (
+    "You are assisting lawyer Andrii Bilytskyi. "
+    "Write concise, human, credible replies for Ukrainian/Russian-speaking Telegram audiences in Germany. "
+    "Tone: calm, professional, empathetic, non-pushy. "
+    "Never invent facts, never promise an outcome, never claim representation has already started. "
+    "Prefer Ukrainian if the incoming message is Ukrainian, Russian if Russian, otherwise simple German or Ukrainian."
 )
 
-CLIENTS: Dict[str, TelegramClient] = {}
-ME_IDS: Dict[str, int] = {}
-PERSIST_LOCK = asyncio.Lock()
-OUTBOUND_LOCK = asyncio.Lock()
-shutdown = asyncio.Event()
+CATEGORY_RULES: Dict[str, Dict[str, Any]] = {
+    "LEGAL_HELP": {
+        "score": 30,
+        "patterns": [
+            r"\bадвокат\b", r"\bюрист\b", r"\brechtsanwalt\b", r"\banwalt\b",
+            r"\bсуд\b", r"\bиск\b", r"\bпозов\b", r"\bklage\b", r"\bgericht\b",
+            r"\bжалоб[аы]\b", r"\bbeschwerde\b", r"\bbeh[oö]rde\b", r"\bamtsgericht\b",
+            r"\bausl[aä]nderbeh[oö]rde\b", r"\bjobcenter\b", r"\bjugendamt\b",
+            r"\bunterhalt\b", r"\baliment", r"\bkindergeld\b", r"\buvg\b",
+            r"\bвнж\b", r"\bпмж\b", r"\baufenthalt\b", r"\baufenthaltstitel\b",
+            r"\bparagraph 24\b", r"\b§\s*24\b", r"\bдокумент[ыа]?\b", r"\bразвод\b",
+            r"\bопек[ауы]?\b", r"\bалименты\b", r"\bнаследств", r"\bдоверенност",
+        ],
+    },
+    "MIGRATION_HELP": {
+        "score": 24,
+        "patterns": [
+            r"\bвиз[аы]\b", r"\bвнж\b", r"\bпараграф\s*24\b", r"\bубежищ", r"\bбежен",
+            r"\baufenthalt\b", r"\baufenthaltserlaubnis\b", r"\bfiktionsbescheinigung\b",
+            r"\btermin\b.*\bausl[aä]nderbeh[oö]rde\b", r"\beinb[uü]rgerung\b",
+            r"\bblu\s*card\b", r"\bсняли\s+с\s+регистрац", r"\bрегистрац[ияи]\b",
+        ],
+    },
+    "FAMILY_LAW": {
+        "score": 24,
+        "patterns": [
+            r"\bдет(и|ей|ям|ьми)\b", r"\bребен", r"\bопек", r"\bотец\b", r"\bмать\b",
+            r"\bразвод\b", r"\bумг\b", r"\bумганг\b", r"\bumgang\b", r"\bsorgerecht\b",
+            r"\bkindeswohl\b", r"\bjugendamt\b", r"\bалименты\b", r"\bunterhalt\b",
+            r"\bконтакт\s+с\s+ребен", r"\bлишили\s+прав", r"\bвывезл[аи]\s+ребен",
+        ],
+    },
+    "STATUS_PROBLEMS": {
+        "score": 18,
+        "patterns": [
+            r"\bотказ\b", r"\bотказали\b", r"\bпроблем[аы]\b.*\bдокумент", r"\bне\s+дают\b",
+            r"\bне\s+отвечают\b", r"\bне\s+принимают\b", r"\bblockiert\b", r"\babgelehnt\b",
+            r"\bkeine\s+antwort\b", r"\btermin\s+не\s+дают\b", r"\bwiderspruch\b",
+        ],
+    },
+    "DOCUMENTS": {
+        "score": 16,
+        "patterns": [
+            r"\bдоверенность\b", r"\bперевод\b", r"\bапостил", r"\bнотари", r"\bдокумент",
+            r"\bсправк", r"\bсвидетельств", r"\bpassport\b", r"\breisepass\b",
+            r"\bрегистрац", r"\banmeldung\b", r"\bummeldung\b",
+        ],
+    },
+    "COURT": {
+        "score": 18,
+        "patterns": [
+            r"\bсуд\b", r"\bgericht\b", r"\bklage\b", r"\bprozess\b", r"\bапелляц",
+            r"\bbeschluss\b", r"\burteil\b", r"\bисполнительн", r"\bvollstreck",
+        ],
+    },
+    "PARTNER_SERVICES": {
+        "score": 10,
+        "patterns": [
+            r"\bстрахов", r"\bversicherung\b", r"\bimmobil", r"\bmakler\b",
+            r"\bпереводчик\b", r"\bsteuerberater\b", r"\bbuchhalter\b",
+            r"\bконсультац(ия|ии)\s+бесплатн", r"\bпомогу\s+оформить\b",
+        ],
+    },
+    "CTA": {
+        "score": 8,
+        "patterns": [
+            r"\bкто\s+сталкивал", r"\bподскажите\b", r"\bкто\s+знает\b",
+            r"\bнужен\b.*\bадвокат\b", r"\bищу\b.*\bюрист\b", r"\bhelp\b",
+            r"\bпосоветуйте\b", r"\bможно\s+ли\b", r"\bчто\s+делать\b",
+        ],
+    },
+}
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if (AsyncOpenAI and OPENAI_API_KEY) else None
+NEGATIVE_RULES: List[Tuple[re.Pattern[str], int, str]] = [
+    (re.compile(r"\bпродам\b|\bverkaufe\b|\bпродаю\b", re.I), 20, "sales"),
+    (re.compile(r"\bработа\b|\bvakanz|\bваканси|\bищем\s+сотрудник", re.I), 15, "job_ad"),
+    (re.compile(r"\bдоставка\b|\bпосылк|\bперевозк|\bbus\b|\bбус\b", re.I), 15, "delivery"),
+    (re.compile(r"\bскидк|\bакци|\bреклама\b|\breklam", re.I), 12, "promo"),
+]
 
 
-# =============================================================================
-# PERSISTENCE
-# =============================================================================
+# =========================
+# Data helpers
+# =========================
+def load_json_file(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Failed loading %s: %s", path.name, e)
+        return default
 
-def load_json(path: str, default):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            logging.error("Failed to load %s", path)
-    return default
 
-
-def save_json(path: str, data):
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+def save_json_file(path: Path, data: Any) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    tmp.replace(path)
 
 
-SEEN = load_json(SEEN_FILE, {})
-LEADS = load_json(LEADS_FILE, {})
-ANALYTICS = load_json(ANALYTICS_FILE, {})
-FAVORITES = load_json(FAVORITES_FILE, {})
-OUTBOUND_STATS = load_json(OUTBOUND_FILE, {})
+ANALYTICS: Dict[str, Any] = load_json_file(ANALYTICS_PATH, {})
+SEEN_MESSAGES: Dict[str, float] = load_json_file(SEEN_MESSAGES_PATH, {})
 
 
-# =============================================================================
-# UTILS
-# =============================================================================
+def normalize_analytics_structure() -> None:
+    global ANALYTICS
+    if not isinstance(ANALYTICS, dict):
+        ANALYTICS = {}
 
-def normalize(text: str) -> str:
-    text = (text or "").lower()
-    text = re.sub(r"https?://\S+", " ", text)
-    text = re.sub(r"[^\w\s@§/+.-]", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    migrated = False
+    for group_name, group_data in list(ANALYTICS.items()):
+        if not isinstance(group_data, dict):
+            ANALYTICS[group_name] = {
+                "total": 0,
+                "categories": {},
+                "last_seen": None,
+                "last_text": "",
+            }
+            migrated = True
+            continue
+
+        if "total" not in group_data or not isinstance(group_data.get("total"), int):
+            group_data["total"] = int(group_data.get("total") or 0)
+            migrated = True
+
+        if "categories" not in group_data or not isinstance(group_data.get("categories"), dict):
+            old_cats = group_data.get("category_counts") or {}
+            group_data["categories"] = old_cats if isinstance(old_cats, dict) else {}
+            migrated = True
+
+        if "last_seen" not in group_data:
+            group_data["last_seen"] = None
+            migrated = True
+
+        if "last_text" not in group_data:
+            group_data["last_text"] = ""
+            migrated = True
+
+    if migrated:
+        save_json_file(ANALYTICS_PATH, ANALYTICS)
+        logger.info("analytics.json migrated to current schema")
 
 
-def truncate(text: str, n: int) -> str:
-    text = text or ""
-    return text if len(text) <= n else text[: n - 1] + "…"
+normalize_analytics_structure()
 
 
-def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+def ensure_analytics_bucket(group_name: str) -> Dict[str, Any]:
+    if group_name not in ANALYTICS or not isinstance(ANALYTICS[group_name], dict):
+        ANALYTICS[group_name] = {}
+
+    bucket = ANALYTICS[group_name]
+    if not isinstance(bucket.get("total"), int):
+        bucket["total"] = int(bucket.get("total") or 0)
+    if not isinstance(bucket.get("categories"), dict):
+        old_cats = bucket.get("category_counts") or {}
+        bucket["categories"] = old_cats if isinstance(old_cats, dict) else {}
+    if "last_seen" not in bucket:
+        bucket["last_seen"] = None
+    if "last_text" not in bucket:
+        bucket["last_text"] = ""
+    return bucket
+
+
+def update_analytics_bucket(group_name: str, category: str, text: str = "") -> None:
+    bucket = ensure_analytics_bucket(group_name)
+    bucket["total"] += 1
+    bucket["categories"][category] = bucket["categories"].get(category, 0) + 1
+    bucket["last_seen"] = int(time.time())
+    if text:
+        bucket["last_text"] = text[:300]
+    save_json_file(ANALYTICS_PATH, ANALYTICS)
+
+
+def make_seen_key(chat_id: int, message_id: int) -> str:
+    return f"{chat_id}:{message_id}"
+
+
+def is_seen(chat_id: int, message_id: int) -> bool:
+    return make_seen_key(chat_id, message_id) in SEEN_MESSAGES
+
+
+def mark_seen(chat_id: int, message_id: int) -> None:
+    SEEN_MESSAGES[make_seen_key(chat_id, message_id)] = time.time()
+    if len(SEEN_MESSAGES) > SEEN_CACHE_LIMIT:
+        items = sorted(SEEN_MESSAGES.items(), key=lambda x: x[1], reverse=True)[:SEEN_CACHE_LIMIT]
+        SEEN_MESSAGES.clear()
+        SEEN_MESSAGES.update(dict(items))
+    save_json_file(SEEN_MESSAGES_PATH, SEEN_MESSAGES)
+
+
+# =========================
+# OpenAI client
+# =========================
+OPENAI_CLIENT: Optional[AsyncOpenAI] = None
+if OPENAI_API_KEY and ENABLE_OPENAI:
+    try:
+        OPENAI_CLIENT = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT_SEC)
+    except Exception as e:
+        logger.warning("Failed to initialize OpenAI client: %s", e)
+        OPENAI_CLIENT = None
+
+
+# =========================
+# Session config
+# =========================
+@dataclass
+class SessionConfig:
+    name: str
+    api_id: int
+    api_hash: str
+    session_value: str
+    monitored_chats: List[str]
+
+
+@dataclass
+class SenderInfo:
+    sender_id: Optional[int]
+    username: Optional[str]
+    display_name: str
+    is_bot: bool
+
+
+@dataclass
+class LeadResult:
+    category: str
+    score: int
+    reasons: List[str]
+    keywords: List[str]
+    needs_reply: bool
+    draft_reply: str
+    source: str
+
+
+# =========================
+# Helpers
+# =========================
+def parse_session_config(index: int) -> Optional[SessionConfig]:
+    api_id = os.getenv(f"TG_API_ID_{index}", "").strip()
+    api_hash = os.getenv(f"TG_API_HASH_{index}", "").strip()
+    session_string = os.getenv(f"TG_SESSION_STRING_{index}", "").strip()
+
+    if not api_id and not api_hash and not session_string:
+        return None
+
+    if not api_hash:
+        logger.error("[session%s] Missing api_hash. Set TG_API_HASH_%s env var.", index, index)
+        return None
+    if not api_id:
+        logger.error("[session%s] Missing api_id. Set TG_API_ID_%s env var.", index, index)
+        return None
+    if not session_string:
+        logger.error("[session%s] Missing session string. Set TG_SESSION_STRING_%s env var.", index, index)
+        return None
+
+    try:
+        api_id_int = int(api_id)
+    except ValueError:
+        logger.error("[session%s] Invalid api_id: %s", index, api_id)
+        return None
+
+    return SessionConfig(
+        name=f"session{index}",
+        api_id=api_id_int,
+        api_hash=api_hash,
+        session_value=session_string,
+        monitored_chats=MONITORED_CHATS,
+    )
+
+
+def build_clients() -> List[Tuple[TelegramClient, SessionConfig]]:
+    clients: List[Tuple[TelegramClient, SessionConfig]] = []
+    for i in range(1, 10):
+        config = parse_session_config(i)
+        if not config:
+            continue
+        client = TelegramClient(StringSession(config.session_value), config.api_id, config.api_hash)
+        clients.append((client, config))
+    return clients
+
+
+CLIENTS = build_clients()
+if not CLIENTS:
+    logger.warning("No Telegram sessions configured")
+
+
+def compact_text(text: str, limit: int = MAX_ALERT_TEXT) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def trim_for_model(text: str) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= MAX_TEXT_LEN_FOR_MODEL else text[:MAX_TEXT_LEN_FOR_MODEL]
 
 
 def detect_language(text: str) -> str:
-    t = text or ""
-    cyr = len(re.findall(r"[А-Яа-яЁёІіЇїЄєҐґ]", t))
-    lat = len(re.findall(r"[A-Za-zÄÖÜäöüß]", t))
-    if cyr >= lat:
-        if re.search(r"[ІіЇїЄєҐґ]", t):
-            return "uk"
+    if re.search(r"[іїєґІЇЄҐ]", text):
+        return "uk"
+    if re.search(r"[а-яА-ЯёЁ]", text):
         return "ru"
-    if re.search(r"\b(der|die|das|und|nicht|mit|für|anwalt|recht|versicherung)\b", t.lower()):
+    if re.search(r"[äöüß]", text.lower()):
         return "de"
-    return "en"
-
-
-def phone_or_contact_present(text: str) -> bool:
-    t = text or ""
-    return bool(
-        re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", t)
-        or re.search(r"@\w{4,}", t)
-        or re.search(r"(?:whatsapp|viber|telegram|tg|instagram|insta|email|e-mail|webseite|site|сайт|личные сообщения|в личку|пишите в лс|пишіть у приват)", t, re.I)
-        or re.search(r"https?://", t, re.I)
-    )
-
-
-def build_message_link(chat, message_id: int) -> str:
-    if getattr(chat, "username", None):
-        return f"https://t.me/{chat.username}/{message_id}"
-    cid = str(chat.id)
-    if cid.startswith("-100"):
-        return f"https://t.me/c/{cid[4:]}/{message_id}"
-    return "🔒 private group"
-
-
-def safe_json_loads(text: str, default: Dict[str, Any]) -> Dict[str, Any]:
-    if not text:
-        return default
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    m = re.search(r"\{.*\}", text, flags=re.S)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
-    return default
-
-
-def make_lead_id() -> str:
-    return f"L{int(time.time())}{str(int(time.time_ns()))[-4:]}"
-
-
-def update_analytics_bucket(group_title: str, category: str):
-    group_data = ANALYTICS.get(group_title, {"total": 0, "categories": {}})
-    group_data["total"] += 1
-    group_data["categories"][category] = group_data["categories"].get(category, 0) + 1
-    ANALYTICS[group_title] = group_data
-
-
-def hash_fingerprint(sender_username: str, text: str) -> str:
-    sender_key = (sender_username or "").lower().strip()
-    base = normalize(text)[:300]
-    return f"{sender_key}|{base}"
-
-
-def purge_seen(hours: int = 72):
-    now = time.time()
-    stale = [k for k, ts in SEEN.items() if now - float(ts) > hours * 3600]
-    for k in stale:
-        SEEN.pop(k, None)
-
-
-# =============================================================================
-# RULES
-# =============================================================================
-
-SPAM_PATTERNS = [
-    r"casino", r"казино", r"беттинг", r"ставк", r"промокод",
-    r"личные кабинеты банков", r"лк банков", r"продажа аккаунтов",
-    r"мошенн", r"обнал", r"отмыв", r"crypto.{0,8}bonus", r"bank accounts? for sale",
-]
-
-LEAD_SEARCH_PATTERNS = [
-    r"\bищу\b.{0,25}\b(адвокат|юрист)",
-    r"\bнужен\b.{0,25}\b(адвокат|юрист)",
-    r"\bпорад(ьте|ьтеся)\b.{0,30}\b(адвокат|юрист)",
-    r"\bконтакт\b.{0,20}\b(адвокат|юрист)",
-    r"\brecommend\b.{0,20}\b(lawyer|attorney)",
-    r"\blooking for\b.{0,20}\b(lawyer|attorney)",
-    r"\b(rechtsanwalt|anwalt)\b.{0,20}\b(gesucht|empfehlen|kontakt)",
-    r"\bпотріб(ен|на)\b.{0,20}\b(адвокат|юрист)",
-    r"\bищу грамотного юриста\b",
-    r"\bкто знает\b.{0,30}\b(адвокат|юрист)",
-    r"\bberatunghilfeschein\b",
-]
-
-LEGAL_HINTS = [
-    "адвокат", "юрист", "lawyer", "attorney", "anwalt", "rechtsanwalt",
-    "внж", "aufenthalt", "§24", "fiktions", "widerspruch", "klage", "sozialgericht",
-    "jobcenter", "sozialamt", "ausländerbehörde", "семейн", "развод", "опека",
-    "arbeitsrecht", "mietrecht", "migration", "deport", "увольнен", "незаконн",
-    "суд", "gericht", "polizei", "прокурат", "уголов", "arbeits", "medizinrecht",
-    "patientenrecht", "пациент", "стоматолог", "страховка не покрывает", "arbeitsvertrag",
-]
-
-PARTNER_SERVICE_HINTS = [
-    "versicherung", "страхов", "rechtsschutz", "kfz", "haftpflicht", "zahn",
-    "krankenversicherung", "пенс", "финанс", "інвест", "ипотек", "baufinanzierung",
-    "steuer", "налог", "strom", "gas", "immobil", "маклер", "broker", "консультант",
-    "кредит", "leasing", "перевод", "übersetzung", "webseite", "сайт", "маркетинг",
-    "jobcenter", "anmeldung", "schufa", "wbs",
-]
-
-LAWYER_COMPETITOR_HINTS = [
-    "адвокат украины", "українським адвокатом", "свидоцтво адвоката", "rechtsanwalt", "anwalt"
-]
-
-QUESTION_RE = re.compile(
-    r"\?|"
-    r"\b(как|что|почему|зачем|когда|где|куда|сколько|можно ли|"
-    r"подскажите|підкажіть|посоветуйте|порадьте|рекомендуйте|"
-    r"как быть|was|wie|wo|warum|може|чому|хто може)\b",
-    re.IGNORECASE,
-)
-
-
-def classify_message(text: str) -> Tuple[str, str]:
-    t = normalize(text)
-    if not t or len(t) < 3:
-        return ("ignore", "empty_or_short")
-
-    for pat in SPAM_PATTERNS:
-        if re.search(pat, t, re.I):
-            return ("reject_spam", f"spam:{pat}")
-
-    for pat in LEAD_SEARCH_PATTERNS:
-        if re.search(pat, t, re.I):
-            return ("lead_search", f"lead_search:{pat}")
-
-    has_contact = phone_or_contact_present(text)
-    has_partner_hint = any(h in t for h in PARTNER_SERVICE_HINTS)
-    is_likely_competitor_lawyer = any(h in t for h in LAWYER_COMPETITOR_HINTS)
-
-    if has_contact and has_partner_hint and not is_likely_competitor_lawyer:
-        return ("partner_services", "partner_services:contact+adjacent_service")
-
-    if QUESTION_RE.search(text or "") and any(h in t for h in LEGAL_HINTS):
-        return ("lead_question", "lead_question:question+legal_hint")
-
-    if has_contact and is_likely_competitor_lawyer:
-        return ("ignore", "other_lawyer_or_legal_promo")
-
-    return ("ignore", "no_match")
-
-
-# =============================================================================
-# OPENAI
-# =============================================================================
-
-AI_JSON_FALLBACK = {
-    "action": "skip",
-    "confidence": 0.0,
-    "language": "ru",
-    "reason": "fallback",
-    "reply_text": "",
-}
-
-AI_SYSTEM = f"""
-Ты — Юстин, цифровой помощник адвоката Андрія Білицького.
-Твоя задача — подготовить КОРОТКИЙ и ПРАВДОПОДОБНЫЙ текст личного сообщения в Telegram.
-
-О юристе:
-- {LAWYER_BRIEF}
-- Сайт: {LAWYER_SITE}
-- Профиль: {LAWYER_ANWALT}
-- Telegram-группа: {LAWYER_GROUP}
-
-Правила:
-1. Пиши на языке исходного сообщения.
-2. Не придумывай фактов и не обещай результат.
-3. Не пиши как массовая реклама.
-4. Тон: живой, вежливый, короткий, персональный.
-5. Для lead_search / lead_question:
-   - представься как Юстин, помощник адвоката;
-   - предложи коротко описать ситуацию;
-   - укажи 1-2 ссылки максимум.
-6. Для partner_pitch:
-   - предложи профессиональный контакт/взаимные рекомендации;
-   - не дави и не спамь;
-   - можно упомянуть, что адвокат работает с украинцами в Германии.
-7. Для skip reply_text должен быть пустой.
-8. Верни только JSON:
-{{
-  "action": "skip|lead_search_reply|lead_question_reply|partner_pitch",
-  "confidence": 0.0,
-  "language": "ru|uk|de|en",
-  "reason": "short reason",
-  "reply_text": "..."
-}}
-"""
-
-
-async def ai_generate_reply(
-    scenario_hint: str,
-    message_text: str,
-    group_title: str,
-    sender_name: str,
-) -> Dict[str, Any]:
-    if not openai_client:
-        return AI_JSON_FALLBACK
-
-    compact_text = truncate(message_text.strip(), MAX_AI_INPUT_CHARS)
-    user_prompt = (
-        f"scenario_hint={scenario_hint}\n"
-        f"group_title={group_title}\n"
-        f"sender_name={sender_name}\n"
-        f"message_text:\n{compact_text}\n\n"
-        "Сначала оцени, стоит ли писать этому человеку. "
-        "Если сообщение явно нецелевое или рискованное — action=skip."
-    )
-
-    try:
-        resp = await asyncio.wait_for(
-            openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=AI_SYSTEM,
-                input=user_prompt,
-                store=False,
-                text={"format": {"type": "json_object"}},
-            ),
-            timeout=OPENAI_TIMEOUT_SEC,
-        )
-        parsed = safe_json_loads(getattr(resp, "output_text", "") or "", AI_JSON_FALLBACK)
-        parsed.setdefault("action", "skip")
-        parsed.setdefault("confidence", 0.0)
-        parsed.setdefault("language", detect_language(message_text))
-        parsed.setdefault("reason", "no_reason")
-        parsed.setdefault("reply_text", "")
-        return parsed
-    except Exception as e:
-        logging.warning("OpenAI json_object failed: %s", e)
-
-    try:
-        resp = await asyncio.wait_for(
-            openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=AI_SYSTEM + "\nВерни строго JSON, без markdown.",
-                input=user_prompt,
-                store=False,
-            ),
-            timeout=OPENAI_TIMEOUT_SEC,
-        )
-        parsed = safe_json_loads(getattr(resp, "output_text", "") or "", AI_JSON_FALLBACK)
-        parsed.setdefault("action", "skip")
-        parsed.setdefault("confidence", 0.0)
-        parsed.setdefault("language", detect_language(message_text))
-        parsed.setdefault("reason", "no_reason")
-        parsed.setdefault("reply_text", "")
-        return parsed
-    except Exception as e:
-        logging.warning("OpenAI plain json failed: %s", e)
-        return AI_JSON_FALLBACK
-
-
-def fallback_reply(category: str, language: str) -> str:
-    if category in ("lead_search", "lead_question"):
-        if language == "uk":
-            return (
-                "Вітаю! Я — Юстин, помічник адвоката Андрія Білицького. "
-                "Побачив Ваше повідомлення. Якщо питання ще актуальне, можете коротко описати ситуацію тут у приватних повідомленнях. "
-                f"Також інформація про адвоката: {LAWYER_SITE} або {LAWYER_ANWALT}"
-            )
-        if language == "de":
-            return (
-                "Guten Tag! Ich bin Justin, der Assistent von Rechtsanwalt Andrii Bilytskyi. "
-                "Ich habe Ihre Nachricht gesehen. Wenn Ihr Anliegen noch aktuell ist, können Sie die Situation kurz privat schildern. "
-                f"Infos: {LAWYER_SITE} oder {LAWYER_ANWALT}"
-            )
-        if language == "en":
-            return (
-                "Hello! I’m Justin, assistant to attorney Andrii Bilytskyi. "
-                "I saw your message. If your issue is still relevant, feel free to briefly describe it in private messages. "
-                f"More info: {LAWYER_SITE} or {LAWYER_ANWALT}"
-            )
-        return (
-            "Здравствуйте! Я — Юстин, помощник адвоката Андрия Билицкого. "
-            "Увидел ваше сообщение. Если вопрос еще актуален, можете коротко описать ситуацию в личных сообщениях. "
-            f"Информация об адвокате: {LAWYER_SITE} или {LAWYER_ANWALT}"
-        )
-
-    if category == "partner_services":
-        if language == "uk":
-            return (
-                "Вітаю! Я — Юстин, помічник адвоката Андрія Білицького. "
-                "Побачив Ваше повідомлення. Якщо Вам цікаві професійні контакти та взаємні рекомендації для клієнтів у Німеччині, "
-                f"буду радий зв’язку. Сайт: {LAWYER_SITE} | Telegram-група: {LAWYER_GROUP}"
-            )
-        if language == "de":
-            return (
-                "Guten Tag! Ich bin Justin, Assistent von Rechtsanwalt Andrii Bilytskyi. "
-                "Ich habe Ihren Beitrag gesehen. Falls beruflicher Austausch oder gegenseitige Empfehlungen für Mandanten in Deutschland interessant sind, "
-                f"freue ich mich über Kontakt. Website: {LAWYER_SITE} | Telegram: {LAWYER_GROUP}"
-            )
-        return (
-            "Здравствуйте! Я — Юстин, помощник адвоката Андрия Билицкого. "
-            "Увидел ваше сообщение. Если вам интересны профессиональные контакты и взаимные рекомендации клиентов в Германии, "
-            f"буду рад связи. Сайт: {LAWYER_SITE} | Telegram-группа: {LAWYER_GROUP}"
-        )
-    return ""
-
-
-# =============================================================================
-# ENTITY CACHE
-# =============================================================================
-
-async def load_or_fetch_entities(client: TelegramClient, group_usernames: List[str]):
-    import pickle
-
-    entities = []
-    for username in sorted(set(group_usernames)):
-        try:
-            filename = f"{username.strip('@')}.pkl"
-            path = os.path.join(CACHE_DIR, filename)
-            if os.path.exists(path):
-                with open(path, "rb") as f:
-                    ent = pickle.load(f)
-                entities.append(ent)
-                logging.info("✅ cache entity: %s", username)
-            else:
-                entity = await client.get_entity(username)
-                with open(path, "wb") as f:
-                    pickle.dump(entity, f)
-                entities.append(entity)
-                logging.info("📥 fetched entity: %s", username)
-        except Exception as e:
-            logging.error("❌ failed entity %s: %s", username, e)
-    return entities
-
-
-# =============================================================================
-# OUTBOUND LIMITS
-# =============================================================================
-
-def _day_key() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
-
-
-def _hour_key() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H")
-
-
-def _session_stats(session_name: str) -> Dict[str, Any]:
-    s = OUTBOUND_STATS.setdefault(session_name, {})
-    s.setdefault("dm_day", {})
-    s.setdefault("dm_hour", {})
-    s.setdefault("invite_day", {})
-    s.setdefault("last_dm_ts", 0.0)
-    return s
-
-
-async def can_send_dm(session_name: str) -> Tuple[bool, str]:
-    async with OUTBOUND_LOCK:
-        s = _session_stats(session_name)
-        now = time.time()
-        if now - float(s.get("last_dm_ts", 0)) < MIN_SECONDS_BETWEEN_DMS:
-            wait = int(MIN_SECONDS_BETWEEN_DMS - (now - float(s.get("last_dm_ts", 0))))
-            return False, f"wait_{wait}s"
-        if int(s["dm_day"].get(_day_key(), 0)) >= OUTBOUND_DM_PER_DAY:
-            return False, "dm_day_limit"
-        if int(s["dm_hour"].get(_hour_key(), 0)) >= OUTBOUND_DM_PER_HOUR:
-            return False, "dm_hour_limit"
-        return True, "ok"
-
-
-async def mark_dm_sent(session_name: str):
-    async with OUTBOUND_LOCK:
-        s = _session_stats(session_name)
-        s["dm_day"][_day_key()] = int(s["dm_day"].get(_day_key(), 0)) + 1
-        s["dm_hour"][_hour_key()] = int(s["dm_hour"].get(_hour_key(), 0)) + 1
-        s["last_dm_ts"] = time.time()
-        save_json(OUTBOUND_FILE, OUTBOUND_STATS)
-
-
-async def can_invite(session_name: str) -> Tuple[bool, str]:
-    async with OUTBOUND_LOCK:
-        s = _session_stats(session_name)
-        if int(s["invite_day"].get(_day_key(), 0)) >= INVITE_PER_DAY:
-            return False, "invite_day_limit"
-        return True, "ok"
-
-
-async def mark_invite_sent(session_name: str):
-    async with OUTBOUND_LOCK:
-        s = _session_stats(session_name)
-        s["invite_day"][_day_key()] = int(s["invite_day"].get(_day_key(), 0)) + 1
-        save_json(OUTBOUND_FILE, OUTBOUND_STATS)
-
-
-# =============================================================================
-# LEADS
-# =============================================================================
-
-async def remember_lead(lead: Dict[str, Any]):
-    async with PERSIST_LOCK:
-        LEADS[lead["id"]] = lead
-        save_json(LEADS_FILE, LEADS)
-
-
-async def remember_favorite(lead_id: str):
-    async with PERSIST_LOCK:
-        lead = LEADS.get(lead_id)
-        if not lead:
-            return False
-        FAVORITES[lead_id] = {
-            "saved_at": now_iso(),
-            "sender_username": lead.get("sender_username"),
-            "sender_name": lead.get("sender_name"),
-            "category": lead.get("category"),
-            "source_link": lead.get("message_link"),
-            "text": lead.get("text"),
-        }
-        save_json(FAVORITES_FILE, FAVORITES)
-        return True
-
-
-def render_lead_card(lead: Dict[str, Any]) -> str:
-    ai = lead.get("ai", {}) or {}
-    action = ai.get("action", "n/a")
-    confidence = ai.get("confidence", 0.0)
-    return (
-        f"🆕 LEAD {lead['id']}\n"
-        f"Категория: {lead['category']} | AI: {action} ({confidence:.2f})\n"
-        f"Причина: {lead.get('rule_reason', '-')}\n"
-        f"Сессия: {lead['session_name']}\n"
-        f"Группа: {lead['chat_title']}\n"
-        f"Ссылка: {lead['message_link']}\n"
-        f"Отправитель: {lead.get('sender_name') or '-'} "
-        f"{('@' + lead['sender_username']) if lead.get('sender_username') else ''}\n"
-        f"Текст:\n{truncate(lead['text'], 1200)}\n\n"
-        f"Draft:\n{truncate(ai.get('reply_text', '') or '', 1200)}\n\n"
-        f"Команды:\n"
-        f"/show {lead['id']}\n"
-        f"/regen {lead['id']}\n"
-        f"/dm {lead['id']}\n"
-        f"/pitch {lead['id']}\n"
-        f"/invite {lead['id']}\n"
-        f"/fav {lead['id']}\n"
-        f"/ignore {lead['id']}"
-    )
-
-
-async def send_admin_notice(client: TelegramClient, text: str):
-    try:
-        await client.send_message(ADMIN_NOTIFY_USERNAME, text)
-    except Exception as e:
-        logging.error("Failed admin notice: %s", e)
-
-
-# =============================================================================
-# RESOLVE / ACTIONS
-# =============================================================================
-
-async def resolve_user_entity(client: TelegramClient, lead: Dict[str, Any]):
-    username = (lead.get("sender_username") or "").strip().lstrip("@")
-    user_id = lead.get("sender_id")
-    access_hash = lead.get("sender_access_hash")
-
-    if username:
-        return await client.get_input_entity(username)
-    if user_id and access_hash:
-        return InputPeerUser(user_id=user_id, access_hash=access_hash)
-    if user_id:
-        return await client.get_input_entity(user_id)
-
-    raise ValueError("No sender entity data")
-
-
-async def send_dm_for_lead(client: TelegramClient, lead_id: str, force_regen: bool = False) -> str:
-    lead = LEADS.get(lead_id)
-    if not lead:
-        return f"❌ Lead {lead_id} not found"
-
-    allowed, reason = await can_send_dm(lead["session_name"])
-    if not allowed:
-        return f"⛔ DM blocked: {reason}"
-
-    ai = lead.get("ai", {}) or {}
-    if force_regen or not (ai.get("reply_text") or "").strip():
-        ai = await ai_generate_reply(
-            scenario_hint=lead["category"],
-            message_text=lead["text"],
-            group_title=lead["chat_title"],
-            sender_name=lead.get("sender_name") or lead.get("sender_username") or "unknown",
-        )
-        if not ai.get("reply_text"):
-            ai["reply_text"] = fallback_reply(lead["category"], detect_language(lead["text"]))
-        lead["ai"] = ai
-        await remember_lead(lead)
-
-    text = (lead["ai"].get("reply_text") or "").strip()
-    if not text:
-        return "⛔ Empty reply_text"
-
-    try:
-        entity = await resolve_user_entity(client, lead)
-        await client.send_message(entity, text)
-        await mark_dm_sent(lead["session_name"])
-        lead["last_dm_at"] = now_iso()
-        lead["status"] = "dm_sent"
-        await remember_lead(lead)
-        return f"✅ DM sent for {lead_id}"
-    except UserPrivacyRestrictedError:
-        return "⚠️ User privacy restricted"
-    except UserNotMutualContactError:
-        return "⚠️ User is not mutual contact"
-    except PeerFloodError:
-        return "⚠️ PeerFlood"
-    except FloodWaitError as e:
-        return f"⚠️ FloodWait {e.seconds}s"
-    except ChatWriteForbiddenError:
-        return "⚠️ ChatWriteForbidden"
-    except RPCError as e:
-        return f"⚠️ RPC error: {type(e).__name__}: {e}"
-    except Exception as e:
-        return f"⚠️ Failed to send DM: {type(e).__name__}: {e}"
-
-
-async def invite_lead_to_group(client: TelegramClient, lead_id: str) -> str:
-    lead = LEADS.get(lead_id)
-    if not lead:
-        return f"❌ Lead {lead_id} not found"
-
-    allowed, reason = await can_invite(lead["session_name"])
-    if not allowed:
-        return f"⛔ Invite blocked: {reason}"
-
-    try:
-        user_entity = await resolve_user_entity(client, lead)
-        group_entity = await client.get_input_entity(TARGET_INVITE_GROUP)
-        await client(InviteToChannelRequest(channel=group_entity, users=[user_entity]))
-        await mark_invite_sent(lead["session_name"])
-        lead["last_invite_at"] = now_iso()
-        lead["status"] = "invited"
-        await remember_lead(lead)
-        return f"✅ Invited {lead_id} to {TARGET_INVITE_GROUP}"
-    except UserNotMutualContactError:
-        return "⚠️ UserNotMutualContact"
-    except UserPrivacyRestrictedError:
-        return "⚠️ UserPrivacyRestricted"
-    except PeerFloodError:
-        return "⚠️ PeerFlood"
-    except FloodWaitError as e:
-        return f"⚠️ FloodWait {e.seconds}s"
-    except RPCError as e:
-        return f"⚠️ RPC error: {type(e).__name__}: {e}"
-    except Exception as e:
-        return f"⚠️ Invite failed: {type(e).__name__}: {e}"
-
-
-# =============================================================================
-# MESSAGE PROCESSING
-# =============================================================================
-
-async def handle_candidate_message(client: TelegramClient, config: Dict[str, Any], event):
-    if not event.raw_text:
-        return
-
-    me_id = ME_IDS.get(config["session_name"])
-    sender = await event.get_sender()
-    if me_id and getattr(sender, "id", None) == me_id:
-        return
-
-    event_key = f"msg:{event.chat_id}:{event.id}"
-    async with PERSIST_LOCK:
-        purge_seen()
-        if event_key in SEEN:
-            return
-        SEEN[event_key] = time.time()
-        save_json(SEEN_FILE, SEEN)
-
-    text = event.raw_text.strip()
-    category, rule_reason = classify_message(text)
-    if category in ("ignore", "reject_spam"):
-        return
-
-    sender_username = getattr(sender, "username", None)
-    sender_name = (
-        f"{(getattr(sender, 'first_name', '') or '').strip()} {(getattr(sender, 'last_name', '') or '').strip()}".strip()
-        or sender_username
-        or str(getattr(sender, "id", "unknown"))
-    )
-
-    fp = hash_fingerprint(sender_username or "", text)
-    dup_key = f"fp:{fp}"
-    async with PERSIST_LOCK:
-        ts = float(SEEN.get(dup_key, 0.0) or 0.0)
-        if time.time() - ts < 12 * 3600:
-            return
-        SEEN[dup_key] = time.time()
-        save_json(SEEN_FILE, SEEN)
-
-    ai = await ai_generate_reply(
-        scenario_hint=category,
-        message_text=text,
-        group_title=getattr(event.chat, "title", "Unknown"),
-        sender_name=sender_name,
-    )
-    if not ai.get("reply_text") and category in ("lead_search", "lead_question", "partner_services"):
-        ai["reply_text"] = fallback_reply(category, detect_language(text))
-        ai["language"] = detect_language(text)
-
-    lead = {
-        "id": make_lead_id(),
-        "created_at": now_iso(),
-        "session_name": config["session_name"],
-        "chat_id": event.chat_id,
-        "chat_title": getattr(event.chat, "title", "Unknown"),
-        "message_id": event.id,
-        "message_link": build_message_link(event.chat, event.id),
-        "sender_id": getattr(sender, "id", None),
-        "sender_access_hash": getattr(sender, "access_hash", None),
-        "sender_username": sender_username,
-        "sender_name": sender_name,
-        "text": text,
-        "category": category,
-        "rule_reason": rule_reason,
-        "ai": ai,
-        "status": "new",
-    }
-
-    await remember_lead(lead)
-    update_analytics_bucket(lead["chat_title"], category)
-    save_json(ANALYTICS_FILE, ANALYTICS)
-
-    card = render_lead_card(lead)
-    await send_admin_notice(client, card)
-
-    if AUTO_SEND_HIGH_CONFIDENCE and ai.get("action") != "skip" and float(ai.get("confidence", 0.0) or 0.0) >= AUTO_SEND_THRESHOLD:
-        result = await send_dm_for_lead(client, lead["id"])
-        await send_admin_notice(client, f"🤖 AUTO_SEND {lead['id']}: {result}")
-        if AUTO_INVITE_AFTER_DM and result.startswith("✅"):
-            inv = await invite_lead_to_group(client, lead["id"])
-            await send_admin_notice(client, f"🤖 AUTO_INVITE {lead['id']}: {inv}")
-
-
-async def handle_private_inbound(client: TelegramClient, config: Dict[str, Any], event):
-    if not event.is_private or not event.raw_text:
-        return
-
-    sender = await event.get_sender()
-    me_id = ME_IDS.get(config["session_name"])
-    if getattr(sender, "id", None) == me_id:
-        return
-
-    text = (
-        f"📩 PRIVATE INBOUND [{config['session_name']}]\n"
-        f"From: {getattr(sender, 'first_name', '')} {getattr(sender, 'last_name', '')} "
-        f"{('@' + sender.username) if getattr(sender, 'username', None) else ''}\n"
-        f"id={getattr(sender, 'id', None)}\n\n"
-        f"{truncate(event.raw_text, 3500)}"
-    )
-    await send_admin_notice(client, text)
-
-
-# =============================================================================
-# COMMANDS
-# =============================================================================
-
-HELP_TEXT = (
-    "Команды Юстина:\n"
-    "/help\n"
-    "/show LEAD_ID\n"
-    "/regen LEAD_ID\n"
-    "/dm LEAD_ID\n"
-    "/pitch LEAD_ID\n"
-    "/invite LEAD_ID\n"
-    "/fav LEAD_ID\n"
-    "/ignore LEAD_ID\n"
-    "/stats"
-)
-
-
-async def handle_command(client: TelegramClient, config: Dict[str, Any], event):
-    if not event.raw_text:
-        return
-
-    text = event.raw_text.strip()
-    if not text.startswith("/"):
-        return
-
-    if not event.is_private:
-        return
-
-    parts = text.split(maxsplit=1)
-    cmd = parts[0].lower()
-    arg = parts[1].strip() if len(parts) > 1 else ""
-
-    if cmd == "/help":
-        await event.reply(HELP_TEXT)
-        return
-
-    if cmd == "/stats":
-        s = OUTBOUND_STATS.get(config["session_name"], {})
-        msg = (
-            f"Stats [{config['session_name']}]\n"
-            f"DM day {_day_key()}: {int((s.get('dm_day') or {}).get(_day_key(), 0))}/{OUTBOUND_DM_PER_DAY}\n"
-            f"DM hour {_hour_key()}: {int((s.get('dm_hour') or {}).get(_hour_key(), 0))}/{OUTBOUND_DM_PER_HOUR}\n"
-            f"Invite day {_day_key()}: {int((s.get('invite_day') or {}).get(_day_key(), 0))}/{INVITE_PER_DAY}"
-        )
-        await event.reply(msg)
-        return
-
-    if not arg:
-        await event.reply("Нужен LEAD_ID")
-        return
-
-    lead = LEADS.get(arg)
-    if not lead:
-        await event.reply(f"Lead {arg} not found")
-        return
-
-    target_client = CLIENTS.get(lead["session_name"])
-    if not target_client:
-        await event.reply(f"Client for {lead['session_name']} not found")
-        return
-
-    if cmd == "/show":
-        await event.reply(render_lead_card(lead))
-        return
-
-    if cmd == "/regen":
-        ai = await ai_generate_reply(
-            scenario_hint=lead["category"],
-            message_text=lead["text"],
-            group_title=lead["chat_title"],
-            sender_name=lead.get("sender_name") or lead.get("sender_username") or "unknown",
-        )
-        if not ai.get("reply_text"):
-            ai["reply_text"] = fallback_reply(lead["category"], detect_language(lead["text"]))
-        lead["ai"] = ai
-        await remember_lead(lead)
-        await event.reply(f"✅ Regenerated for {arg}\n\n{truncate(ai.get('reply_text',''), 3500)}")
-        return
-
-    if cmd in ("/dm", "/pitch"):
-        res = await send_dm_for_lead(target_client, arg, force_regen=False)
-        await event.reply(res)
-        return
-
-    if cmd == "/invite":
-        res = await invite_lead_to_group(target_client, arg)
-        await event.reply(res)
-        return
-
-    if cmd == "/fav":
-        ok = await remember_favorite(arg)
-        if ok:
-            lead = LEADS[arg]
-            fav_text = (
-                f"⭐ FAVORITE {arg}\n"
-                f"{lead.get('sender_name','')} {('@' + lead['sender_username']) if lead.get('sender_username') else ''}\n"
-                f"{lead.get('message_link','')}\n\n"
-                f"{truncate(lead.get('text',''), 3000)}"
-            )
-            await send_admin_notice(target_client, fav_text)
-            await event.reply(f"✅ Saved to favorites: {arg}")
+    return "auto"
+
+
+def build_message_link(chat_username: Optional[str], chat_id: Optional[int], message_id: int) -> str:
+    if chat_username:
+        chat_username = chat_username.lstrip("@")
+        return f"https://t.me/{chat_username}/{message_id}"
+    if chat_id:
+        raw = str(chat_id)
+        if raw.startswith("-100"):
+            raw = raw[4:]
         else:
-            await event.reply(f"❌ Failed to save favorite: {arg}")
-        return
-
-    if cmd == "/ignore":
-        lead["status"] = "ignored"
-        await remember_lead(lead)
-        await event.reply(f"✅ Ignored {arg}")
-        return
+            raw = raw.lstrip("-")
+        return f"https://t.me/c/{raw}/{message_id}"
+    return "(no link)"
 
 
-# =============================================================================
-# LIFECYCLE
-# =============================================================================
-
-def _handle_signal():
-    shutdown.set()
+def normalize_category(raw: str) -> str:
+    value = (raw or "LEGAL_HELP").strip().upper()
+    return value if value else "LEGAL_HELP"
 
 
-async def run_client_forever(config: Dict[str, Any]):
-    session_name = config["session_name"]
+def is_target_category(category: str) -> bool:
+    return normalize_category(category) in REPLY_TARGET_CATEGORIES
 
-    if not config["api_id"]:
-        logging.error("[%s] Missing api_id. Set TG_API_ID_1 / TG_API_ID_2 env vars.", session_name)
-        return
-    if not config["api_hash"]:
-        logging.error("[%s] Missing api_hash. Set TG_API_HASH_1 / TG_API_HASH_2 env vars.", session_name)
-        return
 
-    backoff = 5
+# =========================
+# Telethon safe sender/chat extraction
+# =========================
+async def safe_get_sender_info(client: TelegramClient, event: events.NewMessage.Event) -> SenderInfo:
+    sender_id = getattr(event, "sender_id", None)
 
-    while not shutdown.is_set():
-        client = None
+    sender_obj = getattr(event, "sender", None)
+    if isinstance(sender_obj, User):
+        username = getattr(sender_obj, "username", None)
+        name_parts = [getattr(sender_obj, "first_name", None), getattr(sender_obj, "last_name", None)]
+        display_name = " ".join([x for x in name_parts if x]).strip() or username or f"id={sender_id}"
+        return SenderInfo(
+            sender_id=sender_id,
+            username=(f"@{username}" if username else None),
+            display_name=display_name,
+            is_bot=bool(getattr(sender_obj, "bot", False)),
+        )
+
+    if sender_id:
         try:
-            client = TelegramClient(session_name, config["api_id"], config["api_hash"])
-            await client.connect()
-
-            if not await client.is_user_authorized():
-                logging.error("[%s] Session is not authorized. Authorize locally first.", session_name)
-                await asyncio.sleep(backoff)
-                continue
-
-            me = await client.get_me()
-            ME_IDS[session_name] = me.id
-            CLIENTS[session_name] = client
-            logging.info("[%s] Connected as @%s", session_name, getattr(me, "username", None))
-
-            entities = await load_or_fetch_entities(client, GROUPS_TO_MONITOR)
-            logging.info("[%s] Monitoring %s chats", session_name, len(entities))
-
-            @client.on(events.NewMessage(chats=entities, incoming=True))
-            async def group_handler(event):
-                try:
-                    await handle_candidate_message(client, config, event)
-                except Exception:
-                    logging.exception("[%s] group_handler failed", session_name)
-
-            @client.on(events.NewMessage(incoming=True))
-            async def private_inbound_handler(event):
-                try:
-                    await handle_private_inbound(client, config, event)
-                except Exception:
-                    logging.exception("[%s] private_inbound_handler failed", session_name)
-
-            @client.on(events.NewMessage(outgoing=True))
-            async def command_handler(event):
-                try:
-                    await handle_command(client, config, event)
-                except Exception:
-                    logging.exception("[%s] command_handler failed", session_name)
-
-            backoff = 5
-            await client.run_until_disconnected()
-
+            entity = await client.get_entity(PeerUser(sender_id))
+            username = getattr(entity, "username", None)
+            name_parts = [getattr(entity, "first_name", None), getattr(entity, "last_name", None)]
+            display_name = " ".join([x for x in name_parts if x]).strip() or username or f"id={sender_id}"
+            return SenderInfo(
+                sender_id=sender_id,
+                username=(f"@{username}" if username else None),
+                display_name=display_name,
+                is_bot=bool(getattr(entity, "bot", False)),
+            )
+        except TypeNotFoundError as e:
+            logger.warning("safe_get_sender_info TypeNotFoundError for sender_id=%s: %s", sender_id, e)
         except Exception as e:
-            logging.critical("[%s] Critical error: %s", session_name, e)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 60)
-        finally:
-            CLIENTS.pop(session_name, None)
-            if client:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
+            logger.warning("safe_get_sender_info failed for sender_id=%s: %s", sender_id, e)
+
+    return SenderInfo(
+        sender_id=sender_id,
+        username=None,
+        display_name=f"id={sender_id}" if sender_id else "unknown",
+        is_bot=False,
+    )
 
 
-async def main():
-    loop = asyncio.get_running_loop()
-    loop.set_exception_handler(loop_exc_handler)
+async def safe_get_chat_meta(event: events.NewMessage.Event) -> Tuple[Optional[int], Optional[str], str]:
+    chat = await event.get_chat()
+    chat_id = getattr(event, "chat_id", None)
+    chat_username = getattr(chat, "username", None)
+    chat_title = getattr(chat, "title", None) or chat_username or str(chat_id)
+    if chat_username and not str(chat_username).startswith("@"):
+        chat_username = f"@{chat_username}"
+    return chat_id, chat_username, chat_title
 
-    import signal
-    for sig in (signal.SIGINT, signal.SIGTERM):
+
+# =========================
+# Rules-based classifier
+# =========================
+def rules_classify(text: str) -> LeadResult:
+    hay = (text or "").strip()
+    score = 0
+    reasons: List[str] = []
+    matched_keywords: List[str] = []
+    category_scores: Dict[str, int] = defaultdict(int)
+
+    for category, cfg in CATEGORY_RULES.items():
+        category_base = cfg.get("score", 0)
+        local_matches = 0
+        for pattern in cfg.get("patterns", []):
+            if re.search(pattern, hay, flags=re.I):
+                local_matches += 1
+                matched_keywords.append(pattern)
+        if local_matches:
+            gained = category_base + max(0, local_matches - 1) * 4
+            category_scores[category] += gained
+            score += gained
+            reasons.append(f"{category}:{local_matches}")
+
+    for pattern, penalty, reason in NEGATIVE_RULES:
+        if pattern.search(hay):
+            score -= penalty
+            reasons.append(f"-{reason}")
+
+    if len(hay) < 15:
+        score -= 8
+        reasons.append("-too_short")
+
+    if re.search(r"\b(подскажите|кто знает|можно ли|что делать|посоветуйте)\b", hay, flags=re.I):
+        score += 6
+        reasons.append("question_intent")
+
+    best_category = "OTHER"
+    if category_scores:
+        best_category = max(category_scores.items(), key=lambda x: x[1])[0]
+
+    if best_category == "CTA" and score >= LEAD_SCORE_THRESHOLD:
+        best_category = "LEGAL_HELP"
+
+    needs_reply = score >= REPLY_MIN_SCORE and is_target_category(best_category)
+
+    return LeadResult(
+        category=best_category,
+        score=max(0, min(100, score)),
+        reasons=reasons[:10],
+        keywords=matched_keywords[:12],
+        needs_reply=needs_reply,
+        draft_reply="",
+        source="rules",
+    )
+
+
+# =========================
+# OpenAI enrichment
+# =========================
+async def generate_openai_json(text: str, rules_result: LeadResult) -> Optional[Dict[str, Any]]:
+    if not OPENAI_CLIENT:
+        return None
+
+    lang = detect_language(text)
+    prompt_text = trim_for_model(text)
+    user_prompt = (
+        "Analyze the Telegram message and return valid JSON only. "
+        "The output must be JSON. No markdown, no commentary, no code fences.\n\n"
+        "Required JSON schema:\n"
+        "{\n"
+        '  "category": "LEGAL_HELP|MIGRATION_HELP|FAMILY_LAW|STATUS_PROBLEMS|DOCUMENTS|COURT|PARTNER_SERVICES|OTHER",\n'
+        '  "score": 0-100,\n'
+        '  "reasons": ["short reason"],\n'
+        '  "needs_reply": true_or_false,\n'
+        '  "draft_reply": "short realistic human reply",\n'
+        '  "language": "uk|ru|de|auto"\n'
+        "}\n\n"
+        f"Lawyer profile context: {json.dumps(LAWYER_PROFILE, ensure_ascii=False)}\n"
+        f"Rules pre-analysis: {json.dumps({ 'category': rules_result.category, 'score': rules_result.score, 'reasons': rules_result.reasons }, ensure_ascii=False)}\n"
+        f"Message language guess: {lang}\n"
+        "Reply constraints for draft_reply:\n"
+        "- sound natural and credible\n"
+        "- 2-5 sentences\n"
+        "- mention the lawyer can look at the situation and suggest next steps\n"
+        "- invite private contact only if appropriate\n"
+        "- no guarantees, no aggressive sales tone\n\n"
+        f"Message:\n{prompt_text}"
+    )
+
+    try:
+        resp = await OPENAI_CLIENT.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {"role": "system", "content": SYSTEM_STYLE},
+                {"role": "user", "content": user_prompt},
+            ],
+            text={"format": {"type": "json_object"}},
+        )
+        output = getattr(resp, "output_text", None)
+        if not output:
+            return None
+        return json.loads(output)
+    except Exception as e:
+        logger.warning("OpenAI json_object failed: %s", e)
+        return None
+
+
+async def enrich_lead_with_openai(text: str, rules_result: LeadResult) -> LeadResult:
+    data = await generate_openai_json(text, rules_result)
+    if not data:
+        return rules_result
+
+    category = normalize_category(str(data.get("category") or rules_result.category))
+    score = data.get("score", rules_result.score)
+    try:
+        score = int(score)
+    except Exception:
+        score = rules_result.score
+    score = max(0, min(100, score))
+
+    reasons = data.get("reasons")
+    if not isinstance(reasons, list):
+        reasons = rules_result.reasons
+    reasons = [str(x) for x in reasons][:10]
+
+    draft_reply = str(data.get("draft_reply") or "").strip()
+    needs_reply = bool(data.get("needs_reply", rules_result.needs_reply))
+
+    if not is_target_category(category):
+        needs_reply = False
+
+    return LeadResult(
+        category=category,
+        score=score,
+        reasons=reasons,
+        keywords=rules_result.keywords,
+        needs_reply=needs_reply,
+        draft_reply=draft_reply,
+        source="openai",
+    )
+
+
+# =========================
+# Reply fallback
+# =========================
+def fallback_reply(text: str, category: str) -> str:
+    lang = detect_language(text)
+    if lang == "uk":
+        return (
+            "Вітаю. Ситуація схожа на ту, де важливі документи й конкретні обставини. "
+            "Можу коротко подивитися, які саме кроки тут доцільні в Німеччині або у транскордонному контексті. "
+            "Якщо зручно, напишіть у приватні повідомлення та надішліть короткий опис і наявні документи: "
+            f"{LAWYER_PROFILE['telegram']}"
+        )
+    if lang == "de":
+        return (
+            "Guten Tag. Das klingt nach einer Frage, bei der die Unterlagen und die genaue Situation entscheidend sind. "
+            "Ich kann mir das kurz ansehen und einschätzen, welche nächsten Schritte in Deutschland sinnvoll sind. "
+            f"Schreiben Sie mir bei Bedarf privat: {LAWYER_PROFILE['telegram']}"
+        )
+    return (
+        "Здравствуйте. Похоже, здесь важны детали и документы, потому что от них зависит правильный следующий шаг. "
+        "Могу кратко посмотреть ситуацию и подсказать, как лучше действовать в Германии или в трансграничном вопросе. "
+        f"Если удобно, напишите в личные сообщения: {LAWYER_PROFILE['telegram']}"
+    )
+
+
+# =========================
+# Alert formatting
+# =========================
+def format_alert(
+    session_name: str,
+    chat_title: str,
+    link: str,
+    sender: SenderInfo,
+    lead: LeadResult,
+    text: str,
+) -> str:
+    keywords_line = ", ".join(lead.keywords[:6]) if lead.keywords else "-"
+    reasons_line = ", ".join(lead.reasons[:8]) if lead.reasons else "-"
+    sender_label = sender.username or sender.display_name
+    draft = lead.draft_reply.strip() if lead.draft_reply.strip() else fallback_reply(text, lead.category)
+    return (
+        f"🧠 Lead | {lead.category} (score={lead.score})\n"
+        f"📡 {session_name} | {chat_title}\n"
+        f"🔗 {link}\n"
+        f"👤 {sender_label} id={sender.sender_id}\n"
+        f"🏷 keywords: {keywords_line}\n"
+        f"🧩 reasons: {reasons_line}\n"
+        f"📝 text:\n{compact_text(text, MAX_ALERT_TEXT)}\n\n"
+        f"💬 draft:\n{draft}"
+    )
+
+
+# =========================
+# Message processing
+# =========================
+async def send_alert(client: TelegramClient, text: str) -> None:
+    try:
+        await client.send_message(ALERT_CHAT, text)
+    except FloodWaitError as e:
+        logger.warning("FloodWait while sending alert: sleep %ss", e.seconds)
+        await asyncio.sleep(e.seconds + 1)
+        await client.send_message(ALERT_CHAT, text)
+    except Exception as e:
+        logger.error("Failed to send alert: %s", e)
+
+
+async def maybe_send_group_reply(
+    event: events.NewMessage.Event,
+    lead: LeadResult,
+    original_text: str,
+) -> None:
+    if not AUTO_REPLY_TO_GROUP:
+        return
+    if lead.score < REPLY_MIN_SCORE or not lead.needs_reply:
+        return
+
+    draft = lead.draft_reply.strip() or fallback_reply(original_text, lead.category)
+    try:
+        await event.reply(draft)
+    except FloodWaitError as e:
+        logger.warning("FloodWait while replying to group: sleep %ss", e.seconds)
+        await asyncio.sleep(e.seconds + 1)
+        await event.reply(draft)
+    except Exception as e:
+        logger.error("Failed group reply: %s", e)
+
+
+async def classify_message(text: str) -> LeadResult:
+    rules_result = rules_classify(text)
+
+    if rules_result.score < max(20, LEAD_SCORE_THRESHOLD - 15):
+        return rules_result
+
+    enriched = await enrich_lead_with_openai(text, rules_result)
+    if not enriched.draft_reply and enriched.needs_reply:
+        enriched.draft_reply = fallback_reply(text, enriched.category)
+    return enriched
+
+
+async def handle_candidate_message(
+    client: TelegramClient,
+    config: SessionConfig,
+    event: events.NewMessage.Event,
+) -> None:
+    if not event.message:
+        return
+    if getattr(event.message, "message", None) is None:
+        return
+    if not getattr(event, "is_group", False) and not getattr(event, "is_channel", False):
+        return
+
+    text = (event.raw_text or "").strip()
+    if not text:
+        return
+
+    chat_id, chat_username, chat_title = await safe_get_chat_meta(event)
+    message_id = int(event.message.id)
+
+    if chat_id is not None and is_seen(chat_id, message_id):
+        return
+
+    sender = await safe_get_sender_info(client, event)
+    if sender.is_bot:
+        return
+
+    me = await client.get_me()
+    if IGNORE_OWN_MESSAGES and sender.sender_id and getattr(me, "id", None) == sender.sender_id:
+        return
+
+    lead = await classify_message(text)
+
+    if lead.score < LEAD_SCORE_THRESHOLD:
+        if chat_id is not None:
+            mark_seen(chat_id, message_id)
+        return
+
+    update_analytics_bucket(chat_title, lead.category, text)
+
+    link = build_message_link(chat_username, chat_id, message_id)
+    alert_text = format_alert(config.name, chat_title, link, sender, lead, text)
+
+    if SEND_DRAFT_TO_ALERT:
+        await send_alert(client, alert_text)
+
+    await maybe_send_group_reply(event, lead, text)
+
+    if chat_id is not None:
+        mark_seen(chat_id, message_id)
+
+
+# =========================
+# Startup / caching
+# =========================
+async def cache_monitored_entities(client: TelegramClient, config: SessionConfig) -> None:
+    ok = 0
+    for chat_ref in config.monitored_chats:
         try:
-            loop.add_signal_handler(sig, _handle_signal)
-        except NotImplementedError:
-            pass
+            entity = await client.get_entity(chat_ref)
+            username = getattr(entity, "username", None)
+            logger.info("✅ cache entity: @%s", username or chat_ref)
+            ok += 1
+        except Exception as e:
+            logger.warning("⚠️ failed cache entity %s: %s", chat_ref, e)
+    logger.info("[%s] Monitoring %s chats", config.name, ok)
 
-    tasks = [asyncio.create_task(run_client_forever(cfg)) for cfg in ACCOUNTS]
-    await shutdown.wait()
 
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+async def register_handlers(client: TelegramClient, config: SessionConfig) -> None:
+    @client.on(events.NewMessage(chats=config.monitored_chats))
+    async def group_handler(event: events.NewMessage.Event) -> None:
+        try:
+            await handle_candidate_message(client, config, event)
+        except TypeNotFoundError as e:
+            logger.warning("[%s] group_handler TypeNotFoundError skipped: %s", config.name, e)
+        except Exception:
+            logger.exception("[%s] group_handler failed", config.name)
+
+
+# =========================
+# Main
+# =========================
+async def start_one(client: TelegramClient, config: SessionConfig) -> None:
+    await client.connect()
+    if not await client.is_user_authorized():
+        logger.error("[%s] Session is not authorized. Recreate TG_SESSION_STRING_%s.", config.name, config.name[-1])
+        return
+
+    me = await client.get_me()
+    username = getattr(me, "username", None)
+    logger.info("[%s] Connected as @%s", config.name, username or getattr(me, "id", "unknown"))
+
+    await cache_monitored_entities(client, config)
+    await register_handlers(client, config)
+
+
+async def main() -> None:
+    if not MONITORED_CHATS:
+        logger.warning("MONITORED_CHATS is empty. Set usernames separated by commas.")
+
+    if not CLIENTS:
+        logger.error("No valid Telegram clients configured. Exiting.")
+        return
+
+    for client, config in CLIENTS:
+        try:
+            await start_one(client, config)
+        except Exception:
+            logger.exception("Failed to start %s", config.name)
+
+    await asyncio.gather(*(client.run_until_disconnected() for client, _ in CLIENTS))
 
 
 if __name__ == "__main__":
