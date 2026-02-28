@@ -1129,6 +1129,28 @@ async def run_client_forever(config: Dict[str, Any]):
         client = None
         try:
             session_path = os.path.join(SESSION_DIR, session_name)
+
+            legacy_candidates = [
+                f"{session_name}.session",
+                os.path.join(DATA_DIR, f"{session_name}.session"),
+            ]
+
+            new_session_file = f"{session_path}.session"
+            new_journal_file = f"{session_path}.session-journal"
+            
+            if not os.path.exists(new_session_file):
+                for old_file in legacy_candidates:
+                    old_journal = f"{old_file}-journal"
+                    if os.path.exists(old_file):
+                        try:
+                            os.replace(old_file, new_session_file)
+                            if os.path.exists(old_journal):
+                                os.replace(old_journal, new_journal_file)
+                            logging.info("[%s] Migrated legacy session: %s -> %s", session_name, old_file, new_session_file)
+                            break
+                        except Exception as e:
+                            logging.warning("[%s] Failed to migrate legacy session from %s: %s", session_name, old_file, e)
+                            
             client = TelegramClient(session_path, config["api_id"], config["api_hash"])
             await client.connect()
 
