@@ -138,6 +138,7 @@ MAX_AI_INPUT_CHARS = int(os.getenv("MAX_AI_INPUT_CHARS", "2400"))
 DEFAULT_DATA_DIR = "/data" if os.path.isdir("/data") else "."
 DATA_DIR = os.getenv("DATA_DIR", DEFAULT_DATA_DIR).strip() or "."
 CACHE_DIR = os.getenv("CACHE_DIR", os.path.join(DATA_DIR, "group_cache"))
+SESSION_DIR = os.getenv("SESSION_DIR", os.path.join(DATA_DIR, "sessions"))
 SEEN_FILE = os.path.join(DATA_DIR, "seen_messages.json")
 LEADS_FILE = os.path.join(DATA_DIR, "leads.json")
 ANALYTICS_FILE = os.path.join(DATA_DIR, "analytics.json")
@@ -146,6 +147,7 @@ OUTBOUND_FILE = os.path.join(DATA_DIR, "outbound_stats.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(SESSION_DIR, exist_ok=True)
 
 OUTBOUND_DM_PER_DAY = int(os.getenv("OUTBOUND_DM_PER_DAY", "25"))
 OUTBOUND_DM_PER_HOUR = int(os.getenv("OUTBOUND_DM_PER_HOUR", "8"))
@@ -201,6 +203,24 @@ OUTBOUND_STATS = load_json(OUTBOUND_FILE, {})
 # =============================================================================
 # UTILS
 # =============================================================================
+
+SERVICE_PREFIXES = (
+    "🆕 LEAD ",
+    "📩 PRIVATE INBOUND [",
+    "🤖 AUTO_SEND ",
+    "🤖 AUTO_INVITE ",
+    "⭐ FAVORITE ",
+)
+
+SERVICE_USERNAMES = {
+    ADMIN_NOTIFY_USERNAME.lower(),
+    *{
+        (cfg.get("your_username") or "").lower()
+        for cfg in ACCOUNTS
+        if cfg.get("your_username")
+    },
+}
+
 
 def normalize(text: str) -> str:
     text = (text or "").lower()
@@ -289,6 +309,23 @@ def purge_seen(hours: int = 72):
     stale = [k for k, ts in SEEN.items() if now - float(ts) > hours * 3600]
     for k in stale:
         SEEN.pop(k, None)
+
+
+def is_service_message_text(text: str) -> bool:
+    t = (text or "").strip()
+    return t.startswith(SERVICE_PREFIXES)
+
+
+def known_internal_sender(sender) -> bool:
+    if not sender:
+        return False
+    sender_id = getattr(sender, "id", None)
+    sender_username = (getattr(sender, "username", "") or "").lower()
+    if sender_id and sender_id in set(ME_IDS.values()):
+        return True
+    if sender_username and sender_username in SERVICE_USERNAMES:
+        return True
+    return False
 
 
 # =============================================================================
@@ -410,7 +447,10 @@ AI_SYSTEM = f"""
    - не дави и не спамь;
    - можно упомянуть, что адвокат работает с украинцами в Германии.
 7. Для skip reply_text должен быть пустой.
-8. Верни только JSON:
+8. Верни ответ строго в формате JSON.
+9. Только JSON object. Без markdown, без пояснений, без лишнего текста.
+
+Верни только JSON:
 {{
   "action": "skip|lead_search_reply|lead_question_reply|partner_pitch",
   "confidence": 0.0,
@@ -419,6 +459,35 @@ AI_SYSTEM = f"""
   "reply_text": "..."
 }}
 """
+
+
+def _normalize_ai_payload(message_text: str, parsed: Dict[str, Any]) -> Dict[str, Any]:
+    parsed = parsed or {}
+
+    action = str(parsed.get("action", "skip") or "skip").strip()
+    if action not in {"skip", "lead_search_reply", "lead_question_reply", "partner_pitch"}:
+        action = "skip"
+
+    try:
+        confidence = float(parsed.get("confidence", 0.0) or 0.0)
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    language = str(parsed.get("language", "") or "").strip().lower()
+    if language not in {"ru", "uk", "de", "en"}:
+        language = detect_language(message_text)
+
+    reason = str(parsed.get("reason", "no_reason") or "no_reason").strip()
+    reply_text = str(parsed.get("reply_text", "") or "").strip()
+
+    return {
+        "action": action,
+        "confidence": confidence,
+        "language": language,
+        "reason": reason,
+        "reply_text": reply_text,
+    }
 
 
 async def ai_generate_reply(
@@ -430,21 +499,30 @@ async def ai_generate_reply(
     if not openai_client:
         return AI_JSON_FALLBACK
 
-    compact_text = truncate(message_text.strip(), MAX_AI_INPUT_CHARS)
+    compact_text = truncate((message_text or "").strip(), MAX_AI_INPUT_CHARS)
+
+    json_instruction = (
+        "Return valid JSON only. "
+        "Output must be a single JSON object with keys: "
+        "action, confidence, language, reason, reply_text. "
+        "No markdown, no comments, no extra text."
+    )
+
     user_prompt = (
         f"scenario_hint={scenario_hint}\n"
         f"group_title={group_title}\n"
         f"sender_name={sender_name}\n"
+        f"{json_instruction}\n"
         f"message_text:\n{compact_text}\n\n"
         "Сначала оцени, стоит ли писать этому человеку. "
-        "Если сообщение явно нецелевое или рискованное — action=skip."
+        "Если сообщение явно нецелевое, рискованное или похоже на спам — action=skip."
     )
 
     try:
         resp = await asyncio.wait_for(
             openai_client.responses.create(
                 model=OPENAI_MODEL,
-                instructions=AI_SYSTEM,
+                instructions=AI_SYSTEM + "\nReturn JSON only.",
                 input=user_prompt,
                 store=False,
                 text={"format": {"type": "json_object"}},
@@ -452,12 +530,8 @@ async def ai_generate_reply(
             timeout=OPENAI_TIMEOUT_SEC,
         )
         parsed = safe_json_loads(getattr(resp, "output_text", "") or "", AI_JSON_FALLBACK)
-        parsed.setdefault("action", "skip")
-        parsed.setdefault("confidence", 0.0)
-        parsed.setdefault("language", detect_language(message_text))
-        parsed.setdefault("reason", "no_reason")
-        parsed.setdefault("reply_text", "")
-        return parsed
+        return _normalize_ai_payload(message_text, parsed)
+
     except Exception as e:
         logging.warning("OpenAI json_object failed: %s", e)
 
@@ -465,19 +539,24 @@ async def ai_generate_reply(
         resp = await asyncio.wait_for(
             openai_client.responses.create(
                 model=OPENAI_MODEL,
-                instructions=AI_SYSTEM + "\nВерни строго JSON, без markdown.",
+                instructions=AI_SYSTEM + "\nReturn JSON only. Return a single JSON object only.",
                 input=user_prompt,
                 store=False,
             ),
             timeout=OPENAI_TIMEOUT_SEC,
         )
         parsed = safe_json_loads(getattr(resp, "output_text", "") or "", AI_JSON_FALLBACK)
-        parsed.setdefault("action", "skip")
-        parsed.setdefault("confidence", 0.0)
-        parsed.setdefault("language", detect_language(message_text))
-        parsed.setdefault("reason", "no_reason")
-        parsed.setdefault("reply_text", "")
-        return parsed
+        result = _normalize_ai_payload(message_text, parsed)
+
+        if not result.get("reply_text") and result["action"] in {
+            "lead_search_reply",
+            "lead_question_reply",
+            "partner_pitch",
+        }:
+            result["reply_text"] = fallback_reply(scenario_hint, result["language"])
+
+        return result
+
     except Exception as e:
         logging.warning("OpenAI plain json failed: %s", e)
         return AI_JSON_FALLBACK
@@ -671,6 +750,8 @@ def render_lead_card(lead: Dict[str, Any]) -> str:
 
 
 async def send_admin_notice(client: TelegramClient, text: str):
+    if not text:
+        return
     try:
         await client.send_message(ADMIN_NOTIFY_USERNAME, text)
     except Exception as e:
@@ -850,8 +931,10 @@ async def handle_candidate_message(client: TelegramClient, config: Dict[str, Any
     }
 
     await remember_lead(lead)
-    update_analytics_bucket(lead["chat_title"], category)
-    save_json(ANALYTICS_FILE, ANALYTICS)
+
+    async with PERSIST_LOCK:
+        update_analytics_bucket(lead["chat_title"], category)
+        save_json(ANALYTICS_FILE, ANALYTICS)
 
     card = render_lead_card(lead)
     await send_admin_notice(client, card)
@@ -871,6 +954,12 @@ async def handle_private_inbound(client: TelegramClient, config: Dict[str, Any],
     sender = await event.get_sender()
     me_id = ME_IDS.get(config["session_name"])
     if getattr(sender, "id", None) == me_id:
+        return
+
+    if known_internal_sender(sender):
+        return
+
+    if is_service_message_text(event.raw_text):
         return
 
     text = (
@@ -901,6 +990,23 @@ HELP_TEXT = (
 )
 
 
+async def is_authorized_command_sender(event, session_name: str) -> bool:
+    sender = await event.get_sender()
+    me_id = ME_IDS.get(session_name)
+
+    if getattr(sender, "id", None) == me_id:
+        return True
+
+    sender_username = (getattr(sender, "username", "") or "").strip().lstrip("@").lower()
+    if sender_username == ADMIN_NOTIFY_USERNAME.lower():
+        return True
+
+    if getattr(sender, "id", None) in set(ME_IDS.values()):
+        return True
+
+    return False
+
+
 async def handle_command(client: TelegramClient, config: Dict[str, Any], event):
     if not event.raw_text:
         return
@@ -910,6 +1016,9 @@ async def handle_command(client: TelegramClient, config: Dict[str, Any], event):
         return
 
     if not event.is_private:
+        return
+
+    if not await is_authorized_command_sender(event, config["session_name"]):
         return
 
     parts = text.split(maxsplit=1)
@@ -960,7 +1069,7 @@ async def handle_command(client: TelegramClient, config: Dict[str, Any], event):
             ai["reply_text"] = fallback_reply(lead["category"], detect_language(lead["text"]))
         lead["ai"] = ai
         await remember_lead(lead)
-        await event.reply(f"✅ Regenerated for {arg}\n\n{truncate(ai.get('reply_text',''), 3500)}")
+        await event.reply(f"✅ Regenerated for {arg}\n\n{truncate(ai.get('reply_text', ''), 3500)}")
         return
 
     if cmd in ("/dm", "/pitch"):
@@ -979,9 +1088,9 @@ async def handle_command(client: TelegramClient, config: Dict[str, Any], event):
             lead = LEADS[arg]
             fav_text = (
                 f"⭐ FAVORITE {arg}\n"
-                f"{lead.get('sender_name','')} {('@' + lead['sender_username']) if lead.get('sender_username') else ''}\n"
-                f"{lead.get('message_link','')}\n\n"
-                f"{truncate(lead.get('text',''), 3000)}"
+                f"{lead.get('sender_name', '')} {('@' + lead['sender_username']) if lead.get('sender_username') else ''}\n"
+                f"{lead.get('message_link', '')}\n\n"
+                f"{truncate(lead.get('text', ''), 3000)}"
             )
             await send_admin_notice(target_client, fav_text)
             await event.reply(f"✅ Saved to favorites: {arg}")
@@ -1019,7 +1128,8 @@ async def run_client_forever(config: Dict[str, Any]):
     while not shutdown.is_set():
         client = None
         try:
-            client = TelegramClient(session_name, config["api_id"], config["api_hash"])
+            session_path = os.path.join(SESSION_DIR, session_name)
+            client = TelegramClient(session_path, config["api_id"], config["api_hash"])
             await client.connect()
 
             if not await client.is_user_authorized():
@@ -1049,7 +1159,7 @@ async def run_client_forever(config: Dict[str, Any]):
                 except Exception:
                     logging.exception("[%s] private_inbound_handler failed", session_name)
 
-            @client.on(events.NewMessage(outgoing=True))
+            @client.on(events.NewMessage())
             async def command_handler(event):
                 try:
                     await handle_command(client, config, event)
@@ -1083,7 +1193,16 @@ async def main():
         except NotImplementedError:
             pass
 
-    tasks = [asyncio.create_task(run_client_forever(cfg)) for cfg in ACCOUNTS]
+    valid_accounts = [
+        cfg for cfg in ACCOUNTS
+        if cfg.get("api_id") and cfg.get("api_hash")
+    ]
+
+    if not valid_accounts:
+        logging.critical("No valid Telegram accounts configured")
+        return
+
+    tasks = [asyncio.create_task(run_client_forever(cfg)) for cfg in valid_accounts]
     await shutdown.wait()
 
     for t in tasks:
