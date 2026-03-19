@@ -154,13 +154,32 @@ OUTBOUND_DM_PER_HOUR = int(os.getenv("OUTBOUND_DM_PER_HOUR", "8"))
 INVITE_PER_DAY = int(os.getenv("INVITE_PER_DAY", "20"))
 MIN_SECONDS_BETWEEN_DMS = int(os.getenv("MIN_SECONDS_BETWEEN_DMS", "180"))
 
-LAWYER_SITE = "https://andriibilytskyi.com"
+LAWYER_SITE = "https://www.andriibilytskyi.com"
 LAWYER_ANWALT = "https://www.anwalt.de/andrii-bilytskyi"
 LAWYER_GROUP = "https://t.me/advocate_ua_1"
+
 LAWYER_BRIEF = (
-    "Адвокат Андрій Білицький. Правова допомога в Україні та Німеччині. "
-    "Практика включає кримінальні, цивільні, адміністративні справи, міграцію та інтеграцію, "
-    "а також представництво в суді й консультації для українців у Німеччині."
+    "Украинский адвокат Андрей Билицкий в Германии. "
+    "Консультации по правовым вопросам, защита в уголовном производстве, "
+    "представительство в судах Германии по делам о признании решений, "
+    "а также установление местоположения детей и должников."
+)
+
+INFO_BLOCK = (
+    "Украинский адвокат Андрей Билицкий в Германии -\n"
+    "✅ Консультации по правовым вопросам (EMRK / GG).\n"
+    "✅ Защита в уголовном производстве (EuRHiÜbk / IRG).\n"
+    "✅ Представительство в судах Германии в делах о признании решений:\n"
+    "➡️ - взыскании алиментов (HUÜ / AUG);\n"
+    "➡️ - взыскании задолженности по договорам (HAVÜ / ZPO);\n"
+    "➡️ - контактов с детьми (HKÜ, KSÜ / IntFamRVG).\n"
+    "✅ Установление местоположения детей и должников (HZÜ / ZPO).\n\n"
+    "📌 Bogenstr. 56, 42283 Wuppertal\n"
+    "📱 +4916092770731\n"
+    "📱 +380675493839\n"
+    "✉️ andriibilytskyi@gmail.com\n"
+    "🌎 www.andriibilytskyi.com\n"
+    "🌎 www.anwalt.de/andrii-bilytskyi"
 )
 
 CLIENTS: Dict[str, TelegramClient] = {}
@@ -198,6 +217,24 @@ LEADS = load_json(LEADS_FILE, {})
 ANALYTICS = load_json(ANALYTICS_FILE, {})
 FAVORITES = load_json(FAVORITES_FILE, {})
 OUTBOUND_STATS = load_json(OUTBOUND_FILE, {})
+
+INFLIGHT = set()
+
+
+# =============================================================================
+# FILTERS / DISCUSSION HEURISTICS
+# =============================================================================
+
+REPLY_ACTIONS = {"lead_search_reply", "lead_question_reply", "partner_pitch"}
+
+DISCUSSION_WINDOW_SEC = int(os.getenv("DISCUSSION_WINDOW_SEC", "900"))
+MAX_GROUP_ACTIVITY_RECORDS = int(os.getenv("MAX_GROUP_ACTIVITY_RECORDS", "300"))
+
+GROUP_ACTIVITY: Dict[str, List[Tuple[float, str]]] = {}
+
+INVALID_USERNAME_VALUES = {
+    "", "unknown", "none", "null", "n/a", "na", "-", "_"
+}
 
 
 # =============================================================================
@@ -250,6 +287,17 @@ def detect_language(text: str) -> str:
     if re.search(r"\b(der|die|das|und|nicht|mit|für|anwalt|recht|versicherung)\b", t.lower()):
         return "de"
     return "en"
+
+
+def localized_intro(language: str) -> str:
+    language = (language or "").lower()
+    if language == "uk":
+        return "Я - Юстин, помічник адвоката Андрія Білицького."
+    if language == "de":
+        return "Ich bin Justin, Assistent von advokat Andrii Bilytskyi."
+    if language == "en":
+        return "I am Justin, assistant to advokat Andrii Bilytskyi."
+    return "Я - Юстин, помощник адвоката Андрея Билицкого."
 
 
 def phone_or_contact_present(text: str) -> bool:
@@ -326,6 +374,72 @@ def known_internal_sender(sender) -> bool:
     if sender_username and sender_username in SERVICE_USERNAMES:
         return True
     return False
+
+
+def ai_wants_reply(ai: Dict[str, Any]) -> bool:
+    return (ai or {}).get("action") in REPLY_ACTIONS
+
+
+def sender_display_name(sender) -> str:
+    return (
+        f"{(getattr(sender, 'first_name', '') or '').strip()} "
+        f"{(getattr(sender, 'last_name', '') or '').strip()}"
+    ).strip()
+
+
+def has_active_username(sender) -> bool:
+    username = (getattr(sender, "username", "") or "").strip().lstrip("@").lower()
+    display_name = sender_display_name(sender).lower()
+
+    if not username or username in INVALID_USERNAME_VALUES:
+        return False
+
+    if "bot" in username or "bot" in display_name:
+        return False
+
+    if getattr(sender, "bot", False):
+        return False
+
+    return True
+
+
+def make_sender_activity_key(sender) -> str:
+    username = (getattr(sender, "username", "") or "").strip().lstrip("@").lower()
+    if username:
+        return f"u:{username}"
+
+    sender_id = getattr(sender, "id", None)
+    if sender_id is not None:
+        return f"id:{sender_id}"
+
+    display_name = sender_display_name(sender).lower() or "unknown"
+    return f"name:{display_name}"
+
+
+def prune_group_activity(chat_id: int):
+    key = str(chat_id)
+    now = time.time()
+    items = GROUP_ACTIVITY.get(key, [])
+    items = [(ts, skey) for ts, skey in items if now - ts <= DISCUSSION_WINDOW_SEC]
+    GROUP_ACTIVITY[key] = items[-MAX_GROUP_ACTIVITY_RECORDS:]
+
+
+def remember_group_activity(chat_id: int, sender_key: str):
+    key = str(chat_id)
+    prune_group_activity(chat_id)
+    items = GROUP_ACTIVITY.get(key, [])
+    items.append((time.time(), sender_key))
+    GROUP_ACTIVITY[key] = items[-MAX_GROUP_ACTIVITY_RECORDS:]
+
+
+def sender_is_in_group_discussion(chat_id: int, sender_key: str) -> bool:
+    prune_group_activity(chat_id)
+    items = GROUP_ACTIVITY.get(str(chat_id), [])
+
+    distinct_senders = {k for _, k in items}
+    own_count = sum(1 for _, k in items if k == sender_key)
+
+    return len(distinct_senders) >= 2 and own_count >= 1
 
 
 # =============================================================================
@@ -439,16 +553,24 @@ AI_SYSTEM = f"""
 3. Не пиши как массовая реклама.
 4. Тон: живой, вежливый, короткий, персональный.
 5. Для lead_search / lead_question:
-   - представься как Юстин, помощник адвоката;
+   - представься в первой строке:
+     * RU: "Я - Юстин, помощник адвоката Андрея Билицкого."
+     * UK: "Я - Юстин, помічник адвоката Андрія Білицького."
+     * DE: "Ich bin Justin, Assistent von advokat Andrii Bilytskyi."
+     * EN: "I am Justin, assistant to advokat Andrii Bilytskyi."
    - предложи коротко описать ситуацию;
-   - укажи 1-2 ссылки максимум.
+   - ответ должен содержать весь инфоблок ниже без сокращений.
 6. Для partner_pitch:
+   - представься так же;
    - предложи профессиональный контакт/взаимные рекомендации;
    - не дави и не спамь;
-   - можно упомянуть, что адвокат работает с украинцами в Германии.
+   - ответ должен содержать весь инфоблок ниже без сокращений.
 7. Для skip reply_text должен быть пустой.
 8. Верни ответ строго в формате JSON.
 9. Только JSON object. Без markdown, без пояснений, без лишнего текста.
+
+Обязательный инфоблок для каждого непустого reply_text:
+{INFO_BLOCK}
 
 Верни только JSON:
 {{
@@ -515,7 +637,8 @@ async def ai_generate_reply(
         f"{json_instruction}\n"
         f"message_text:\n{compact_text}\n\n"
         "Сначала оцени, стоит ли писать этому человеку. "
-        "Если сообщение явно нецелевое, рискованное или похоже на спам — action=skip."
+        "Если сообщение явно нецелевое, рискованное, похоже на спам, на обычное групповое обсуждение "
+        "или не требует личного контакта — action=skip."
     )
 
     try:
@@ -546,16 +669,7 @@ async def ai_generate_reply(
             timeout=OPENAI_TIMEOUT_SEC,
         )
         parsed = safe_json_loads(getattr(resp, "output_text", "") or "", AI_JSON_FALLBACK)
-        result = _normalize_ai_payload(message_text, parsed)
-
-        if not result.get("reply_text") and result["action"] in {
-            "lead_search_reply",
-            "lead_question_reply",
-            "partner_pitch",
-        }:
-            result["reply_text"] = fallback_reply(scenario_hint, result["language"])
-
-        return result
+        return _normalize_ai_payload(message_text, parsed)
 
     except Exception as e:
         logging.warning("OpenAI plain json failed: %s", e)
@@ -563,49 +677,64 @@ async def ai_generate_reply(
 
 
 def fallback_reply(category: str, language: str) -> str:
+    intro = localized_intro(language)
+
     if category in ("lead_search", "lead_question"):
         if language == "uk":
             return (
-                "Вітаю! Я — Юстин, помічник адвоката Андрія Білицького. "
-                "Побачив Ваше повідомлення. Якщо питання ще актуальне, можете коротко описати ситуацію тут у приватних повідомленнях. "
-                f"Також інформація про адвоката: {LAWYER_SITE} або {LAWYER_ANWALT}"
+                f"{intro}\n"
+                "Побачив Ваше повідомлення. Якщо питання ще актуальне, можете коротко описати ситуацію тут у приватних повідомленнях.\n\n"
+                f"{INFO_BLOCK}"
             )
+
         if language == "de":
             return (
-                "Guten Tag! Ich bin Justin, der Assistent von Rechtsanwalt Andrii Bilytskyi. "
-                "Ich habe Ihre Nachricht gesehen. Wenn Ihr Anliegen noch aktuell ist, können Sie die Situation kurz privat schildern. "
-                f"Infos: {LAWYER_SITE} oder {LAWYER_ANWALT}"
+                f"{intro}\n"
+                "Ich habe Ihre Nachricht gesehen. Wenn Ihr Anliegen noch aktuell ist, können Sie die Situation kurz hier in einer privaten Nachricht schildern.\n\n"
+                f"{INFO_BLOCK}"
             )
+
         if language == "en":
             return (
-                "Hello! I’m Justin, assistant to attorney Andrii Bilytskyi. "
-                "I saw your message. If your issue is still relevant, feel free to briefly describe it in private messages. "
-                f"More info: {LAWYER_SITE} or {LAWYER_ANWALT}"
+                f"{intro}\n"
+                "I saw your message. If your issue is still relevant, feel free to briefly describe the situation here in a private message.\n\n"
+                f"{INFO_BLOCK}"
             )
+
         return (
-            "Здравствуйте! Я — Юстин, помощник адвоката Андрия Билицкого. "
-            "Увидел ваше сообщение. Если вопрос еще актуален, можете коротко описать ситуацию в личных сообщениях. "
-            f"Информация об адвокате: {LAWYER_SITE} или {LAWYER_ANWALT}"
+            f"{intro}\n"
+            "Увидел ваше сообщение. Если вопрос еще актуален, можете коротко описать ситуацию здесь в личных сообщениях.\n\n"
+            f"{INFO_BLOCK}"
         )
 
     if category == "partner_services":
         if language == "uk":
             return (
-                "Вітаю! Я — Юстин, помічник адвоката Андрія Білицького. "
-                "Побачив Ваше повідомлення. Якщо Вам цікаві професійні контакти та взаємні рекомендації для клієнтів у Німеччині, "
-                f"буду радий зв’язку. Сайт: {LAWYER_SITE} | Telegram-група: {LAWYER_GROUP}"
+                f"{intro}\n"
+                "Побачив Ваше повідомлення. Якщо Вам цікаві професійні контакти та взаємні рекомендації для клієнтів у Німеччині, буду радий зв’язку.\n\n"
+                f"{INFO_BLOCK}"
             )
+
         if language == "de":
             return (
-                "Guten Tag! Ich bin Justin, Assistent von Rechtsanwalt Andrii Bilytskyi. "
-                "Ich habe Ihren Beitrag gesehen. Falls beruflicher Austausch oder gegenseitige Empfehlungen für Mandanten in Deutschland interessant sind, "
-                f"freue ich mich über Kontakt. Website: {LAWYER_SITE} | Telegram: {LAWYER_GROUP}"
+                f"{intro}\n"
+                "Ich habe Ihren Beitrag gesehen. Falls beruflicher Austausch oder gegenseitige Empfehlungen für Mandanten in Deutschland interessant sind, freue ich mich über Kontakt.\n\n"
+                f"{INFO_BLOCK}"
             )
+
+        if language == "en":
+            return (
+                f"{intro}\n"
+                "I saw your message. If professional cooperation or mutual client referrals in Germany are relevant, I would be glad to stay in touch.\n\n"
+                f"{INFO_BLOCK}"
+            )
+
         return (
-            "Здравствуйте! Я — Юстин, помощник адвоката Андрия Билицкого. "
-            "Увидел ваше сообщение. Если вам интересны профессиональные контакты и взаимные рекомендации клиентов в Германии, "
-            f"буду рад связи. Сайт: {LAWYER_SITE} | Telegram-группа: {LAWYER_GROUP}"
+            f"{intro}\n"
+            "Увидел ваше сообщение. Если вам интересны профессиональные контакты и взаимные рекомендации клиентов в Германии, буду рад связи.\n\n"
+            f"{INFO_BLOCK}"
         )
+
     return ""
 
 
@@ -787,17 +916,29 @@ async def send_dm_for_lead(client: TelegramClient, lead_id: str, force_regen: bo
         return f"⛔ DM blocked: {reason}"
 
     ai = lead.get("ai", {}) or {}
-    if force_regen or not (ai.get("reply_text") or "").strip():
+
+    if ai.get("action") == "skip":
+        return "⛔ AI marked this lead as skip"
+
+    if force_regen or (ai_wants_reply(ai) and not (ai.get("reply_text") or "").strip()):
         ai = await ai_generate_reply(
             scenario_hint=lead["category"],
             message_text=lead["text"],
             group_title=lead["chat_title"],
             sender_name=lead.get("sender_name") or lead.get("sender_username") or "unknown",
         )
-        if not ai.get("reply_text"):
-            ai["reply_text"] = fallback_reply(lead["category"], detect_language(lead["text"]))
+
+        if ai_wants_reply(ai) and not ai.get("reply_text"):
+            ai["reply_text"] = fallback_reply(
+                lead["category"],
+                ai.get("language") or detect_language(lead["text"])
+            )
+
         lead["ai"] = ai
         await remember_lead(lead)
+
+    if lead["ai"].get("action") == "skip":
+        return "⛔ AI marked this lead as skip"
 
     text = (lead["ai"].get("reply_text") or "").strip()
     if not text:
@@ -872,13 +1013,24 @@ async def handle_candidate_message(client: TelegramClient, config: Dict[str, Any
     if me_id and getattr(sender, "id", None) == me_id:
         return
 
-    event_key = f"msg:{event.chat_id}:{event.id}"
-    async with PERSIST_LOCK:
-        purge_seen()
-        if event_key in SEEN:
-            return
-        SEEN[event_key] = time.time()
-        save_json(SEEN_FILE, SEEN)
+    if known_internal_sender(sender):
+        return
+
+    # 1) Пропускаем неактивные / отсутствующие username
+    #    Примеры: "Станислав", "unknown", пустой username
+    if not has_active_username(sender):
+        logging.info("[%s] Skip sender without active username", config["session_name"])
+        return
+
+    sender_key = make_sender_activity_key(sender)
+
+    # 2) Игнорируем пользователей, которые участвуют в групповом обсуждении
+    if getattr(event, "is_reply", False) or sender_is_in_group_discussion(event.chat_id, sender_key):
+        remember_group_activity(event.chat_id, sender_key)
+        logging.info("[%s] Skip discussion participant in chat %s", config["session_name"], event.chat_id)
+        return
+
+    remember_group_activity(event.chat_id, sender_key)
 
     text = event.raw_text.strip()
     category, rule_reason = classify_message(text)
@@ -892,59 +1044,76 @@ async def handle_candidate_message(client: TelegramClient, config: Dict[str, Any
         or str(getattr(sender, "id", "unknown"))
     )
 
-    fp = hash_fingerprint(sender_username or "", text)
-    dup_key = f"fp:{fp}"
+    event_key = f"msg:{event.chat_id}:{event.id}"
+
     async with PERSIST_LOCK:
-        ts = float(SEEN.get(dup_key, 0.0) or 0.0)
-        if time.time() - ts < 12 * 3600:
+        purge_seen()
+        if event_key in SEEN or event_key in INFLIGHT:
             return
-        SEEN[dup_key] = time.time()
-        save_json(SEEN_FILE, SEEN)
+        INFLIGHT.add(event_key)
 
-    ai = await ai_generate_reply(
-        scenario_hint=category,
-        message_text=text,
-        group_title=getattr(event.chat, "title", "Unknown"),
-        sender_name=sender_name,
-    )
-    if not ai.get("reply_text") and category in ("lead_search", "lead_question", "partner_services"):
-        ai["reply_text"] = fallback_reply(category, detect_language(text))
-        ai["language"] = detect_language(text)
+    try:
+        fp = hash_fingerprint(sender_username or "", text)
+        dup_key = f"fp:{fp}"
 
-    lead = {
-        "id": make_lead_id(),
-        "created_at": now_iso(),
-        "session_name": config["session_name"],
-        "chat_id": event.chat_id,
-        "chat_title": getattr(event.chat, "title", "Unknown"),
-        "message_id": event.id,
-        "message_link": build_message_link(event.chat, event.id),
-        "sender_id": getattr(sender, "id", None),
-        "sender_access_hash": getattr(sender, "access_hash", None),
-        "sender_username": sender_username,
-        "sender_name": sender_name,
-        "text": text,
-        "category": category,
-        "rule_reason": rule_reason,
-        "ai": ai,
-        "status": "new",
-    }
+        async with PERSIST_LOCK:
+            ts = float(SEEN.get(dup_key, 0.0) or 0.0)
+            if time.time() - ts < 12 * 3600:
+                return
 
-    await remember_lead(lead)
+        ai = await ai_generate_reply(
+            scenario_hint=category,
+            message_text=text,
+            group_title=getattr(event.chat, "title", "Unknown"),
+            sender_name=sender_name,
+        )
 
-    async with PERSIST_LOCK:
-        update_analytics_bucket(lead["chat_title"], category)
-        save_json(ANALYTICS_FILE, ANALYTICS)
+        if ai_wants_reply(ai) and not ai.get("reply_text"):
+            ai["reply_text"] = fallback_reply(category, ai.get("language") or detect_language(text))
+            ai["language"] = ai.get("language") or detect_language(text)
 
-    card = render_lead_card(lead)
-    await send_admin_notice(client, card)
+        lead = {
+            "id": make_lead_id(),
+            "created_at": now_iso(),
+            "session_name": config["session_name"],
+            "chat_id": event.chat_id,
+            "chat_title": getattr(event.chat, "title", "Unknown"),
+            "message_id": event.id,
+            "message_link": build_message_link(event.chat, event.id),
+            "sender_id": getattr(sender, "id", None),
+            "sender_access_hash": getattr(sender, "access_hash", None),
+            "sender_username": sender_username,
+            "sender_name": sender_name,
+            "text": text,
+            "category": category,
+            "rule_reason": rule_reason,
+            "ai": ai,
+            "status": "new",
+        }
 
-    if AUTO_SEND_HIGH_CONFIDENCE and ai.get("action") != "skip" and float(ai.get("confidence", 0.0) or 0.0) >= AUTO_SEND_THRESHOLD:
-        result = await send_dm_for_lead(client, lead["id"])
-        await send_admin_notice(client, f"🤖 AUTO_SEND {lead['id']}: {result}")
-        if AUTO_INVITE_AFTER_DM and result.startswith("✅"):
-            inv = await invite_lead_to_group(client, lead["id"])
-            await send_admin_notice(client, f"🤖 AUTO_INVITE {lead['id']}: {inv}")
+        await remember_lead(lead)
+
+        async with PERSIST_LOCK:
+            SEEN[event_key] = time.time()
+            SEEN[dup_key] = time.time()
+            save_json(SEEN_FILE, SEEN)
+
+            update_analytics_bucket(lead["chat_title"], category)
+            save_json(ANALYTICS_FILE, ANALYTICS)
+
+        card = render_lead_card(lead)
+        await send_admin_notice(client, card)
+
+        if AUTO_SEND_HIGH_CONFIDENCE and ai.get("action") != "skip" and float(ai.get("confidence", 0.0) or 0.0) >= AUTO_SEND_THRESHOLD:
+            result = await send_dm_for_lead(client, lead["id"])
+            await send_admin_notice(client, f"🤖 AUTO_SEND {lead['id']}: {result}")
+            if AUTO_INVITE_AFTER_DM and result.startswith("✅"):
+                inv = await invite_lead_to_group(client, lead["id"])
+                await send_admin_notice(client, f"🤖 AUTO_INVITE {lead['id']}: {inv}")
+
+    finally:
+        async with PERSIST_LOCK:
+            INFLIGHT.discard(event_key)
 
 
 async def handle_private_inbound(client: TelegramClient, config: Dict[str, Any], event):
@@ -1065,8 +1234,11 @@ async def handle_command(client: TelegramClient, config: Dict[str, Any], event):
             group_title=lead["chat_title"],
             sender_name=lead.get("sender_name") or lead.get("sender_username") or "unknown",
         )
-        if not ai.get("reply_text"):
-            ai["reply_text"] = fallback_reply(lead["category"], detect_language(lead["text"]))
+        if ai_wants_reply(ai) and not ai.get("reply_text"):
+            ai["reply_text"] = fallback_reply(
+                lead["category"],
+                ai.get("language") or detect_language(lead["text"])
+            )
         lead["ai"] = ai
         await remember_lead(lead)
         await event.reply(f"✅ Regenerated for {arg}\n\n{truncate(ai.get('reply_text', ''), 3500)}")
